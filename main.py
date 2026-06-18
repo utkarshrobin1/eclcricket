@@ -34,9 +34,9 @@ MONGO_URI  = os.getenv("MONGO_URI")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT       = int(os.environ.get("PORT", "8080"))
 
-OWNER_IDS = [8722613907, 8782578728, 1853561247, 6336459877, 8969485956, 5916555560]
+OWNER_IDS = [8722613907, 8782578728, 1853561247, 6336459877, 8969485956, 5916555560, 8943547719]
 
-LOG_GROUP_ID = -1002430970632
+LOG_GROUP_ID = -1004450360286
 
 # Path to the scoreboard template image (1536x1024).
 # Place the template PNG next to this script named scoreboard_template.png,
@@ -518,21 +518,17 @@ async def generate_team_scoreboard_image(context, chat_id: int, game: dict) -> b
 # Name box    = the horizontal panel at the bottom where the player name goes.
 # ---------------------------------------------------------------------------
 _POTM = {
-    "circle_cx_pct": 0.5018,  # X centre — pixel-measured (563 / 1122)
-    "circle_cy_pct": 0.6321,  # Y centre — pixel-measured (887 / 1402)
-    "circle_r_pct":  0.206,  # radius — fills blank area with 6px ring gap (210 / 1122)
-    "name_cx_pct":   0.500,   # name box centre X, fraction of width
-    "name_cy_pct":   0.8752,   # name box centre Y, fraction of height
-    "name_box_w_pct":0.720,   # max width for name text, fraction of width
-    "name_box_h_pct":0.1562   # box height, fraction of height (for font sizing)
+    "circle_cx_pct": 0.730,   # X centre — right-side white circle (new template)
+    "circle_cy_pct": 0.470,   # Y centre — new template
+    "circle_r_pct":  0.245,   # radius — fills inner white area of the ring
 }
 
 
 async def generate_potm_image(context, potm_name: str, potm_id: int) -> bytes | None:
     """
     Compose the POTM card template with the player's pfp (or initial-letter
-    fallback) clipped into the inner circle, and the player name drawn in
-    the name box at the bottom.  Returns PNG bytes or None on failure.
+    fallback) clipped into the right-side white circle.
+    Returns PNG bytes or None on failure. Player name is NOT drawn on the image.
     """
     if not PIL_AVAILABLE:
         return None
@@ -586,33 +582,6 @@ async def generate_potm_image(context, potm_name: str, potm_id: int) -> bytes | 
                 (cx - iw2 // 2, cy - ih2 // 2),
                 initial, font=init_font, fill=(255, 255, 255, 255)
             )
-
-        # ── Draw player name in the name box ─────────────────────────────────
-        raw_name     = potm_name or "Unknown"
-        display_name = (raw_name[:10] + ".....") if len(raw_name) > 10 else raw_name
-
-        name_cx  = int(iw * _POTM["name_cx_pct"])
-        name_cy  = int(ih * _POTM["name_cy_pct"])
-        box_w    = int(iw * _POTM["name_box_w_pct"])
-        box_h    = int(ih * _POTM["name_box_h_pct"])
-
-        # Pick font size: start at 75 % of box height, shrink until it fits
-        font_size = max(12, int(box_h * 0.75))
-        font      = _load_font(font_size)
-        nbbox     = draw.textbbox((0, 0), display_name, font=font)
-        tw        = nbbox[2] - nbbox[0]
-        while tw > box_w * 0.88 and font_size > 12:
-            font_size -= 2
-            font  = _load_font(font_size)
-            nbbox = draw.textbbox((0, 0), display_name, font=font)
-            tw    = nbbox[2] - nbbox[0]
-        th = nbbox[3] - nbbox[1]
-
-        sx = name_cx - tw // 2
-        sy = name_cy - th // 2
-        # Drop shadow then white text
-        draw.text((sx + 2, sy + 2), display_name, font=font, fill=(0, 0, 0, 160))
-        draw.text((sx, sy),         display_name, font=font, fill=(255, 255, 255, 255))
 
         img = img.convert("RGB")
         buf = io.BytesIO()
@@ -845,6 +814,85 @@ async def is_banned(user_id: int) -> bool:
         return doc is not None
     except Exception:
         return False
+
+
+_RANK1_CATEGORIES = [
+    ("total_runs",      "🏃 Total Runs",      "runs"),
+    ("wickets",         "🥎 Wickets",          "wickets"),
+    ("total_6s",        "💥 Sixes",            "sixes"),
+    ("centuries",       "💯 Centuries",        "centuries"),
+    ("half_centuries",  "🌟 Half-Centuries",   "half-centuries"),
+    ("hat_tricks",      "🎩 Hat-Tricks",       "hat-tricks"),
+    ("catches",         "🧤 Catches",          "catches"),
+]
+
+async def _notify_rank1_surpass(context, changed: list):
+    """Broadcast rank #1 surpass messages to all groups and all user DMs."""
+    if not changed:
+        return
+    for (cat_field, cat_label, new_name, new_uid, old_name) in changed:
+        text = (
+            f"🚨 <b>NEW #1 IN {cat_label.upper()}!</b>\n\n"
+            f"⚡ <a href='tg://user?id={new_uid}'>{new_name}</a> has <b>surpassed {old_name}</b> "
+            f"and taken the <b>🥇 #1 spot in {cat_label}!</b>\n\n"
+            f"🏏 Powered by @elitexplays — Can anyone stop them? 👀🔥"
+        )
+        if chats_col is not None:
+            try:
+                async for chat_doc in chats_col.find({"type": {"$in": ["group", "supergroup"]}}):
+                    try:
+                        await context.bot.send_message(chat_doc["chat_id"], text, parse_mode="HTML")
+                        await asyncio.sleep(0.05)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if users_col is not None:
+            try:
+                async for user_doc in users_col.find({}):
+                    try:
+                        await context.bot.send_message(user_doc["user_id"], text, parse_mode="HTML")
+                        await asyncio.sleep(0.05)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+
+async def check_rank1_changes(context, game):
+    """Check if any player in this game just took #1 in any ranking category."""
+    if users_col is None:
+        return
+    if game.get("mode") != "TEAM":
+        players_in_game = {p["id"] for p in game.get("players", [])}
+    else:
+        players_in_game = {
+            p["id"]
+            for key in ("team_a", "team_b")
+            for p in game.get(key, {}).get("players", [])
+        }
+    if not players_in_game:
+        return
+
+    changed = []
+    for (field, label, _) in _RANK1_CATEGORIES:
+        try:
+            docs = await users_col.find({field: {"$gt": 0}}).sort(field, -1).limit(2).to_list(length=2)
+        except Exception:
+            continue
+        if not docs:
+            continue
+        new_top = docs[0]
+        new_uid  = new_top.get("user_id", 0)
+        new_name = new_top.get("first_name", "Unknown")
+        if new_uid not in players_in_game:
+            continue
+        old_name = docs[1].get("first_name", "Unknown") if len(docs) > 1 else None
+        if old_name and new_uid != docs[1].get("user_id"):
+            changed.append((field, label, new_name, new_uid, old_name))
+
+    if changed:
+        asyncio.create_task(_notify_rank1_surpass(context, changed))
 
 
 async def commit_player_stats(game):
@@ -1701,16 +1749,79 @@ async def trigger_full_scorecard_message(context: ContextTypes.DEFAULT_TYPE,
                 _potm_runs = _potm_data.get("runs", 0)
                 _potm_wkts = _potm_data.get("wickets", 0)
                 _potm_link = f"<a href='tg://user?id={_potm_id}'>{_potm_name}</a>"
-                _potm_caption = (
-                    f"🏅 <b>PLAYER OF THE MATCH</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n\n"
-                    f"🌟 {_potm_link} — here's your Reward take this💋\n\n"
-                    f"Your performance today was absolutely outstanding! "
-                    f"You stepped up when it mattered the most, delivered under pressure, "
-                    f"and proved why you're the best on the field. "
-                    f"🏏 {_potm_runs} runs &amp; 🥎 {_potm_wkts} wickets — pure class! "
-                    f"Keep rising, champion! 🔥👑"
-                )
+                _potm_captions = [
+                    (
+                        f"🏅 <b>PLAYER OF THE MATCH</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"🌟 {_potm_link} — here's your reward, take this💋\n\n"
+                        f"🏏 <b>{_potm_runs} runs</b> &amp; 🥎 <b>{_potm_wkts} wickets</b> — absolutely elite!\n"
+                        f"You stepped up when it mattered most and dominated. Pure class! 🔥👑"
+                    ),
+                    (
+                        f"🏅 <b>PLAYER OF THE MATCH — {_potm_name.upper()}</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"🔥 {_potm_link} was UNSTOPPABLE today!\n\n"
+                        f"📊 <b>{_potm_runs} runs · {_potm_wkts} wickets</b>\n"
+                        f"A masterclass performance! The arena bows to you, champion! 🏆👏"
+                    ),
+                    (
+                        f"🌟 <b>OUTSTANDING PERFORMANCE!</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"🏅 {_potm_link} takes <b>Player of the Match!</b>\n\n"
+                        f"💥 <b>{_potm_runs} runs</b> smashed with the bat 🏏\n"
+                        f"⚡ <b>{_potm_wkts} wickets</b> taken with the ball 🥎\n"
+                        f"This is what legends are made of! Keep flying! 🦅🔥"
+                    ),
+                    (
+                        f"👑 <b>HALL OF FAME MOMENT!</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"🏅 {_potm_link} — <b>Player of the Match!</b>\n\n"
+                        f"<b>{_potm_runs} runs · {_potm_wkts} wickets</b>\n"
+                        f"The crowd goes wild! What a special player you are. 🎊🏆"
+                    ),
+                    (
+                        f"🔥 <b>ELITE LEVEL PERFORMANCE!</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"{_potm_link} — tonight's undisputed <b>PLAYER OF THE MATCH!</b> 🏅\n\n"
+                        f"🏏 <b>{_potm_runs} runs</b> — bat on fire!\n"
+                        f"🥎 <b>{_potm_wkts} wickets</b> — bowling was lethal!\n"
+                        f"This one is going in the history books. 📖👑"
+                    ),
+                    (
+                        f"🏅 <b>PLAYER OF THE MATCH</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"🎯 {_potm_link} — YOU are the reason we play this game!\n\n"
+                        f"💪 <b>{_potm_runs} runs &amp; {_potm_wkts} wickets</b>\n"
+                        f"Delivered under pressure, stayed calm, and made history. 🔥🙌"
+                    ),
+                    (
+                        f"🎉 <b>MAGNIFICENT DISPLAY!</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"🏅 {_potm_link} clinches <b>Player of the Match!</b>\n\n"
+                        f"📊 <b>{_potm_runs}</b> runs off the bat | <b>{_potm_wkts}</b> wickets in hand\n"
+                        f"Not just a player — a MATCH WINNER. Respect! 💯🔥"
+                    ),
+                    (
+                        f"⚡ <b>MATCH WINNER ALERT!</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"🏅 {_potm_link} — <b>Player of the Match!</b>\n\n"
+                        f"🏏 <b>{_potm_runs} runs</b> — batting at its finest!\n"
+                        f"🥎 <b>{_potm_wkts} wickets</b> — bowling masterclass!\n"
+                        f"Single-handedly carried the team today. What a legend! 🦁🏆"
+                    ),
+                    (
+                        f"🌟 <b>STAR PERFORMER OF THE DAY</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"🏅 {_potm_link} — everyone, give a round of applause! 👏\n\n"
+                        f"<b>{_potm_runs} runs</b> &amp; <b>{_potm_wkts} wickets</b> — a complete performance!\n"
+                        f"Elite Cricket Bot salutes you, champion! 🎖️🔥"
+                    ),
+                    (
+                        f"🏅 <b>PLAYER OF THE MATCH</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"👑 {_potm_link} — the definition of match-winning cricket!\n\n"
+                        f"🔥 <b>{_potm_runs} runs</b> smashed | <b>{_potm_wkts} wickets</b> claimed\n"
+                        f"When the team needed a hero, you answered. Bow down! 🙇‍♂️🏆"
+                    ),
+                    (
+                        f"💎 <b>DIAMOND PERFORMANCE!</b>\n━━━━━━━━━━━━━━━━\n\n"
+                        f"🏅 {_potm_link} — <b>Player of the Match — undisputed!</b>\n\n"
+                        f"🏏 <b>{_potm_runs} runs</b> with the bat 🔥\n"
+                        f"🥎 <b>{_potm_wkts} wickets</b> with the ball ⚡\n"
+                        f"All-round excellence. You are BUILT DIFFERENT. 💪👑"
+                    ),
+                ]
+                _potm_caption = random.choice(_potm_captions)
                 _potm_img_bytes = await generate_potm_image(context, _potm_name, _potm_id)
                 if _potm_img_bytes:
                     await context.bot.send_photo(
@@ -1728,6 +1839,12 @@ async def trigger_full_scorecard_message(context: ContextTypes.DEFAULT_TYPE,
                     )
         except Exception:
             pass
+
+        if _is_finished:
+            try:
+                await check_rank1_changes(context, game_data)
+            except Exception:
+                pass
 
 
 async def send_top_performers_message(context: ContextTypes.DEFAULT_TYPE,
@@ -2435,7 +2552,12 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_user, target_username = get_user_from_mention(update)
 
         if not target_user and target_username and users_col is not None:
-            db_user = await users_col.find_one({"username": target_username})
+            try:
+                db_user = await asyncio.wait_for(
+                    users_col.find_one({"username": target_username}), timeout=8.0
+                )
+            except Exception:
+                db_user = None
             if db_user:
                 class DummyUser:
                     def __init__(self, uid, fname, uname):
@@ -2504,7 +2626,12 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Try to resolve from DB
         target_user = None
         if users_col is not None:
-            db_user = await users_col.find_one({"username": uname})
+            try:
+                db_user = await asyncio.wait_for(
+                    users_col.find_one({"username": uname}), timeout=8.0
+                )
+            except Exception:
+                db_user = None
             if db_user:
                 target_user = DummyUser(db_user["user_id"], db_user["first_name"], db_user["username"])
 
@@ -5638,6 +5765,41 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result_text = f"🏏 Batter hit: <b>{hit_val}</b>\n\n🏃‍♂️ <b>Great shot! {hit_val} runs!</b> 🔥 ({batter['name']}: {batter['runs']} off {batter['balls_faced']})"
 
         await send_media_safely(context, chat_id, MEDIA.get(hit_val, MEDIA[0]), result_text, reply_to_message_id=update.message.message_id)
+
+        # ── TEAM MODE: 4 consecutive zeros → instant YORKER OUT ──────────────
+        if game.get("mode") == "TEAM" and not is_free_hit:
+            if hit_val == 0:
+                batter["_consec_zeros"] = batter.get("_consec_zeros", 0) + 1
+            else:
+                batter["_consec_zeros"] = 0
+
+            if batter.get("_consec_zeros", 0) >= 4:
+                batter["_consec_zeros"] = 0
+                bowler["wickets"] = bowler.get("wickets", 0) + 1
+                game.setdefault("_over_ball_log", []).append("W")
+                try:
+                    await update_user_db(bowler["id"], {"exp": 20})
+                except Exception:
+                    pass
+                await send_media_safely(
+                    context, chat_id, MEDIA["yorker"],
+                    f"⚠️ <b>4 CONSECUTIVE DOT BALLS!</b> 🎯\n\n"
+                    f"💥 <b>YORKER SPECIAL!</b> The bowler unleashes a thunderbolt YORKER!\n"
+                    f"❌ <b>{batter['name']} is OUT!</b> — Couldn't score 4 balls in a row, and now pays the price! 😤🚶‍♂️",
+                )
+                dismiss_batter(game, batter)
+                game["batting_team_ref"]["wickets"] += 1
+                if game["batting_team_ref"]["wickets"] >= len(game["batting_team_ref"]["players"]) - 1:
+                    await process_team_innings_end(context, chat_id, game)
+                    return
+                game["waiting_for"] = "TEAM_BATTER_SELECT"
+                await context.bot.send_message(
+                    chat_id,
+                    "🏏 Captain/Host, type <code>/batting</code> to see batters list or <code>/batting [number]</code> to select the next batter.",
+                    parse_mode="HTML",
+                )
+                return
+
         if hit_val > 0:
             try:
                 await context.bot.send_message(chat_id, random.choice(HIT_COMMENTARY.get(hit_val, HIT_COMMENTARY[1])), parse_mode="HTML")
@@ -6472,18 +6634,104 @@ async def unbanuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# /resetweekly command — Owner only: reset all weekly stats to 0
+# ---------------------------------------------------------------------------
+
+async def resetweekly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    if update.effective_user is None or update.effective_user.id not in OWNER_IDS:
+        await update.message.reply_text("❌ Owner only command.")
+        return
+    if users_col is None:
+        await update.message.reply_text("❌ Database not connected.")
+        return
+    try:
+        result = await users_col.update_many({}, {"$set": {
+            "weekly_runs":        0,
+            "weekly_wickets":     0,
+            "weekly_conceded":    0,
+            "weekly_balls_bowled": 0,
+            "weekly_balls_faced":  0,
+        }})
+        await update.message.reply_text(
+            f"✅ <b>Weekly leaderboard has been reset!</b>\n\n"
+            f"📊 {result.modified_count} player records zeroed out.\n"
+            f"🏏 Fresh week starts NOW! 🔄",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Reset failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# /ownerhelp command — Owner only: list all owner-only commands
+# ---------------------------------------------------------------------------
+
+async def ownerhelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    if update.effective_user is None or update.effective_user.id not in OWNER_IDS:
+        await update.message.reply_text("❌ Owner only command.")
+        return
+    text = (
+        "🔑 <b>OWNER COMMANDS</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "📢 <b>Broadcast &amp; Messaging</b>\n"
+        "  /broadcast — Send a message to all groups &amp; DMs\n"
+        "  /forward — Forward a replied message to all chats\n\n"
+        "🔒 <b>Ban Management</b>\n"
+        "  /blockuser — Ban a user from all matches\n"
+        "  /unbanuser — Unban a user\n"
+        "  /banlist — View all currently banned users\n\n"
+        "🔑 <b>Permissions</b>\n"
+        "  /permit — Grant a user host permission (optional duration)\n"
+        "  /rpermit — Revoke a user's host permission\n\n"
+        "📊 <b>Stats &amp; Info</b>\n"
+        "  /botstats — View bot-wide statistics\n"
+        "  /botgroups — List all groups the bot is in\n"
+        "  /info [group_id] — View info on a specific group\n\n"
+        "🏏 <b>Match Controls</b>\n"
+        "  /penalty [Team] [Balls] [Runs] — Apply a penalty in a TEAM match\n\n"
+        "🔄 <b>Leaderboard</b>\n"
+        "  /resetweekly — Reset weekly leaderboard stats to 0 for all players\n\n"
+        "🎪 <b>Tournament</b>\n"
+        "  /tournament — Manage tournaments\n"
+        "  /regisopen — Open team registration\n"
+        "  /regisclose — Close team registration\n"
+        "  /allteams — View all registered teams\n"
+        "  /deleteteam — Delete a registered team\n\n"
+        "🛠️ <b>Bot Utilities</b>\n"
+        "  /cachemedia — Cache all bot media files\n"
+        "  /ping — Check bot latency\n"
+        "  /ownerhelp — Show this list\n"
+        "━━━━━━━━━━━━━━━━━━"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
 # /banlist command — Owner only: show all banned users
 # ---------------------------------------------------------------------------
 
 async def banlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in OWNER_IDS:
+    if not update.message:
+        return
+    if update.effective_user is None or update.effective_user.id not in OWNER_IDS:
         await update.message.reply_text("❌ Owner only command.")
         return
     if banned_users_col is None:
         await update.message.reply_text("❌ Database not connected.")
         return
 
-    docs = await banned_users_col.find({}).to_list(length=None)
+    try:
+        docs = await asyncio.wait_for(
+            banned_users_col.find({}).to_list(length=500), timeout=10.0
+        )
+    except Exception:
+        await update.message.reply_text("❌ Failed to fetch ban list. Try again.")
+        return
+
     if not docs:
         await update.message.reply_text("✅ Ban list is currently empty. No users are banned.")
         return
@@ -6666,6 +6914,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("unbanuser",   unbanuser_command))
     app.add_handler(CommandHandler("banlist",     banlist_command))
     app.add_handler(CommandHandler("shift",       shift_command))
+    app.add_handler(CommandHandler("resetweekly", resetweekly_command))
+    app.add_handler(CommandHandler("ownerhelp",   ownerhelp_command))
 
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo_input))
