@@ -826,74 +826,6 @@ _RANK1_CATEGORIES = [
     ("catches",         "🧤 Catches",          "catches"),
 ]
 
-async def _notify_rank1_surpass(context, changed: list):
-    """Broadcast rank #1 surpass messages to all groups and all user DMs."""
-    if not changed:
-        return
-    for (cat_field, cat_label, new_name, new_uid, old_name) in changed:
-        text = (
-            f"🚨 <b>NEW #1 IN {cat_label.upper()}!</b>\n\n"
-            f"⚡ <a href='tg://user?id={new_uid}'>{new_name}</a> has <b>surpassed {old_name}</b> "
-            f"and taken the <b>🥇 #1 spot in {cat_label}!</b>\n\n"
-            f"🏏 Powered by @elitexplays — Can anyone stop them? 👀🔥"
-        )
-        if chats_col is not None:
-            try:
-                async for chat_doc in chats_col.find({"type": {"$in": ["group", "supergroup"]}}):
-                    try:
-                        await context.bot.send_message(chat_doc["chat_id"], text, parse_mode="HTML")
-                        await asyncio.sleep(0.05)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        if users_col is not None:
-            try:
-                async for user_doc in users_col.find({}):
-                    try:
-                        await context.bot.send_message(user_doc["user_id"], text, parse_mode="HTML")
-                        await asyncio.sleep(0.05)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-
-async def check_rank1_changes(context, game):
-    """Check if any player in this game just took #1 in any ranking category."""
-    if users_col is None:
-        return
-    if game.get("mode") != "TEAM":
-        players_in_game = {p["id"] for p in game.get("players", [])}
-    else:
-        players_in_game = {
-            p["id"]
-            for key in ("team_a", "team_b")
-            for p in game.get(key, {}).get("players", [])
-        }
-    if not players_in_game:
-        return
-
-    changed = []
-    for (field, label, _) in _RANK1_CATEGORIES:
-        try:
-            docs = await users_col.find({field: {"$gt": 0}}).sort(field, -1).limit(2).to_list(length=2)
-        except Exception:
-            continue
-        if not docs:
-            continue
-        new_top = docs[0]
-        new_uid  = new_top.get("user_id", 0)
-        new_name = new_top.get("first_name", "Unknown")
-        if new_uid not in players_in_game:
-            continue
-        old_name = docs[1].get("first_name", "Unknown") if len(docs) > 1 else None
-        if old_name and new_uid != docs[1].get("user_id"):
-            changed.append((field, label, new_name, new_uid, old_name))
-
-    if changed:
-        asyncio.create_task(_notify_rank1_surpass(context, changed))
-
 
 async def commit_player_stats(game):
     if users_col is None:
@@ -1840,11 +1772,6 @@ async def trigger_full_scorecard_message(context: ContextTypes.DEFAULT_TYPE,
         except Exception:
             pass
 
-        if _is_finished:
-            try:
-                await check_rank1_changes(context, game_data)
-            except Exception:
-                pass
 
 
 async def send_top_performers_message(context: ContextTypes.DEFAULT_TYPE,
