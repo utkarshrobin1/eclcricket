@@ -1,0 +1,9 @@
+python-telegram-bot[webhooks]
+flask
+apscheduler
+motor
+certifi
+pillow
+dotenv
+
+
