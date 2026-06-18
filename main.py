@@ -6025,7 +6025,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if game.get("state") == "PLAYING" and game.get("waiting_for") == "BOWLER":
         await maybe_send_chase_message(context, chat_id, game)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.4)
         try:
             await trigger_bowl(context, chat_id)
         except Exception:
