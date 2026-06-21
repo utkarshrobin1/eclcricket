@@ -36,7 +36,7 @@ PORT       = int(os.environ.get("PORT", "8080"))
 
 OWNER_IDS = [8828369268]
 
-LOG_GROUP_ID = -5343932183
+LOG_GROUP_ID = -1004483580256
 
 # Path to the scoreboard template image (1536x1024).
 # Place the template PNG next to this script named scoreboard_template.png,
