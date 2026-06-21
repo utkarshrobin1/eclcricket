@@ -518,9 +518,9 @@ async def generate_team_scoreboard_image(context, chat_id: int, game: dict) -> b
 # Name box    = the horizontal panel at the bottom where the player name goes.
 # ---------------------------------------------------------------------------
 _POTM = {
-    "circle_cx_pct": 0.730,   # X centre — right-side white circle (new template)
-    "circle_cy_pct": 0.470,   # Y centre — new template
-    "circle_r_pct":  0.245,   # radius — fills inner white area of the ring
+    "circle_cx_pct": 0.720,   # X centre — right-side white circle (new template)
+    "circle_cy_pct": 0.492,   # Y centre — new template
+    "circle_r_pct":  0.170,   # radius — fills inner white area of the ring
 }
 
 
@@ -3117,13 +3117,13 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cid = chat["chat_id"]
         try:
             if message_to_send:
-                await context.bot.copy_message(chat_id=cid, from_chat_id=update.effective_chat.id, message_id=message_to_send.message_id)
+                await context.bot.copy_message(chat_id=cid, from_chat_id=message_to_send.chat.id, message_id=message_to_send.message_id)
             else:
                 await context.bot.send_message(chat_id=cid, text=text, parse_mode="HTML")
             success += 1
-            await asyncio.sleep(0.05)
         except Exception:
             failed += 1
+        await asyncio.sleep(0.3)
     await status_msg.edit_text(
         f"✅ <b>Broadcast finished!</b>\n\n📨 Sent: {success}\n❌ Failed: {failed}",
         parse_mode="HTML",
@@ -3159,9 +3159,9 @@ async def forward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=message_to_forward.message_id,
             )
             success += 1
-            await asyncio.sleep(0.05)
         except Exception:
             failed += 1
+        await asyncio.sleep(0.3)
     await status_msg.edit_text(
         f"✅ <b>Forward finished!</b>\n\n📨 Sent: {success}\n❌ Failed: {failed}",
         parse_mode="HTML",
@@ -3371,6 +3371,32 @@ async def botstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 <b>Today's Activity</b>\n"
         f"🟢 Users who used bot today: <b>{users_today}</b>\n"
         f"🏘️ Groups active today: <b>{groups_today}</b>",
+        parse_mode="HTML",
+    )
+
+
+async def delstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in OWNER_IDS:
+        await update.message.reply_text("❌ Owner only command.")
+        return
+    if chats_col is None:
+        await update.message.reply_text("❌ Database not connected.")
+        return
+    confirm = await update.message.reply_text("⏳ Resetting bot stats...")
+    # Delete all chat tracking docs (resets groups, DMs, today activity to 0)
+    await chats_col.delete_many({})
+    # Delete all match history docs (resets matches count to 0)
+    if match_history_col is not None:
+        await match_history_col.delete_many({})
+    # Reset last_seen on all users so "users today" goes to 0,
+    # but leave ALL game-stat fields untouched (exp, runs, wickets, etc.)
+    await users_col.update_many({}, {"$unset": {"last_seen": ""}})
+    await confirm.edit_text(
+        "✅ <b>Bot stats have been reset to 0!</b>\n\n"
+        "🗑 Groups &amp; DMs tracking: cleared\n"
+        "🗑 Match history records: cleared\n"
+        "🔄 User activity (last_seen): reset\n\n"
+        "⚠️ <i>User game stats (runs, wickets, exp, etc.) were NOT touched.</i>",
         parse_mode="HTML",
     )
 
@@ -6821,6 +6847,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("permit",      permit_command))
     app.add_handler(CommandHandler("rpermit",     rpermit_command))
     app.add_handler(CommandHandler("botstats",    botstats_command))
+    app.add_handler(CommandHandler("delstats",    delstats_command))
     app.add_handler(CommandHandler("botgroups",   botgroups_command))
     app.add_handler(CommandHandler("info",        groupinfo_command))
     app.add_handler(CommandHandler("history",     history_command))
