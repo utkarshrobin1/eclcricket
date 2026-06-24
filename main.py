@@ -67,6 +67,21 @@ POTM_TEMPLATE_PATH = os.path.join(
 )
 POTM_TEMPLATE_URL = os.getenv("POTM_TEMPLATE_URL", "")
 
+# User Stats card template.
+# Place userstats_template.jpg next to this script, OR set USERSTATS_TEMPLATE_URL.
+USERSTATS_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "userstats_template.jpg"
+)
+USERSTATS_TEMPLATE_URL = os.getenv(
+    "USERSTATS_TEMPLATE_URL",
+    "https://res.cloudinary.com/dxgfxfoog/image/upload/userstats_template.jpg"
+)
+
+# Font used for the user stats card image.
+USERSTATS_FONT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fonts", "PWBoldScript.ttf"
+)
+
 # ---------------------------------------------------------------------------
 # MongoDB Setup
 # ---------------------------------------------------------------------------
@@ -279,6 +294,7 @@ _SB_V2 = {
 _template_cache: bytes | None = None
 _template_v2_cache: bytes | None = None
 _potm_template_cache: bytes | None = None
+_userstats_template_cache: bytes | None = None
 
 # In-memory cache of the composited (template + pfp circles) image per chat.
 # Key: chat_id  →  {"key": (host_id, cap_a_id, cap_b_id), "bytes": <PNG bytes>}
@@ -402,6 +418,166 @@ async def _fetch_user_photo_bytes(context, user_id: int) -> bytes | None:
         await file.download_to_memory(buf)
         return buf.getvalue()
     except Exception:
+        return None
+
+
+def _get_userstats_template_bytes() -> bytes | None:
+    """Return raw bytes of the userstats card template (cached after first load)."""
+    global _userstats_template_cache
+    if _userstats_template_cache is not None:
+        return _userstats_template_cache
+    if os.path.exists(USERSTATS_TEMPLATE_PATH):
+        try:
+            with open(USERSTATS_TEMPLATE_PATH, "rb") as f:
+                _userstats_template_cache = f.read()
+            return _userstats_template_cache
+        except Exception as exc:
+            print(f"[userstats] Failed to read local template: {exc}")
+    if USERSTATS_TEMPLATE_URL:
+        try:
+            req = urllib.request.Request(
+                USERSTATS_TEMPLATE_URL, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                _userstats_template_cache = resp.read()
+            return _userstats_template_cache
+        except Exception as exc:
+            print(f"[userstats] Failed to download template: {exc}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# User Stats card coordinates  (for 1500×1000 template).
+# All _pct values are fractions of image width/height so any size works.
+# ---------------------------------------------------------------------------
+_US = {
+    # Profile-picture circle (top-left white circle)
+    "pfp_cx_pct": 0.1067,   # cx ≈ 160
+    "pfp_cy_pct": 0.1050,   # cy ≈ 105
+    "pfp_r_pct":  0.0633,   # r  ≈  95
+
+    # Value text centre-x (right-side blue box, horizontal midpoint)
+    "val_cx_pct": 0.7300,   # cx ≈ 1095
+
+    # 9 data rows — vertical centre of each value box (fraction of height)
+    "row_cy_pcts": [
+        0.251,   # TOTAL RUNS
+        0.334,   # HIGHEST RUNS
+        0.417,   # BATTING AVG
+        0.500,   # DUCKS
+        0.583,   # TOTAL 50s
+        0.666,   # TOTAL 100s
+        0.749,   # TOTAL WICKETS
+        0.832,   # CAREER ECONOMY
+        0.915,   # HATTRICKS
+    ],
+
+    # Row height fraction (used to size the font so text nearly fills the box)
+    "row_h_pct": 0.083,
+}
+
+
+def _load_userstats_font(size: int):
+    """Load PWBoldScript.ttf at *size*, fall back to bold system font."""
+    if os.path.exists(USERSTATS_FONT_PATH):
+        try:
+            return ImageFont.truetype(USERSTATS_FONT_PATH, size)
+        except Exception:
+            pass
+    return _load_font(size)
+
+
+async def generate_userstats_image(
+    context,
+    user_id: int,
+    total_runs: int,
+    hs_runs: int,
+    hs_balls: int,
+    avg: float,
+    ducks: int,
+    half_centuries: int,
+    centuries: int,
+    wickets: int,
+    eco: float,
+    hat_tricks: int,
+) -> bytes | None:
+    """
+    Compose the userstats card template with the user's pfp in the circle
+    and their stats drawn in each value box.
+    Returns PNG bytes or None on failure.
+    """
+    if not PIL_AVAILABLE:
+        return None
+
+    template_bytes = await asyncio.to_thread(_get_userstats_template_bytes)
+    if template_bytes is None:
+        return None
+
+    photo_bytes = await _fetch_user_photo_bytes(context, user_id)
+
+    try:
+        img  = Image.open(io.BytesIO(template_bytes)).convert("RGBA")
+        iw, ih = img.size
+        draw = ImageDraw.Draw(img)
+
+        # ── Profile picture circle ──────────────────────────────────────────
+        cx = int(iw * _US["pfp_cx_pct"])
+        cy = int(ih * _US["pfp_cy_pct"])
+        r  = int(iw * _US["pfp_r_pct"])
+
+        if photo_bytes:
+            pfp  = Image.open(io.BytesIO(photo_bytes)).convert("RGBA")
+            pw, ph = pfp.size
+            side = min(pw, ph)
+            pfp  = pfp.crop(((pw - side) // 2, (ph - side) // 2,
+                              (pw + side) // 2, (ph + side) // 2))
+            pfp  = pfp.resize((r * 2, r * 2), Image.LANCZOS)
+            mask = Image.new("L", (r * 2, r * 2), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, r * 2, r * 2), fill=255)
+            img.paste(pfp, (cx - r, cy - r), mask)
+
+        # ── Stat values ─────────────────────────────────────────────────────
+        val_cx   = int(iw * _US["val_cx_pct"])
+        row_h    = int(ih * _US["row_h_pct"])
+        # Target font size: fill ~75% of row height so text nearly touches borders
+        font_size = max(10, int(row_h * 0.75))
+        font      = _load_userstats_font(font_size)
+
+        hs_text  = f"{hs_runs} ({hs_balls}b)" if hs_balls > 0 else str(hs_runs)
+        avg_text = f"{avg:.2f}"
+        eco_text = f"{eco:.2f}"
+
+        values = [
+            str(total_runs),
+            hs_text,
+            avg_text,
+            str(ducks),
+            str(half_centuries),
+            str(centuries),
+            str(wickets),
+            eco_text,
+            str(hat_tricks),
+        ]
+
+        row_cy_pcts = _US["row_cy_pcts"]
+        for i, val_str in enumerate(values):
+            row_cy = int(ih * row_cy_pcts[i])
+            bbox   = draw.textbbox((0, 0), val_str, font=font)
+            tw     = bbox[2] - bbox[0]
+            th     = bbox[3] - bbox[1]
+            tx     = val_cx - tw // 2
+            ty     = row_cy - th // 2
+            # Drop shadow for readability
+            draw.text((tx + 2, ty + 2), val_str, font=font, fill=(0, 0, 0, 160))
+            draw.text((tx, ty),         val_str, font=font, fill=(255, 255, 255, 255))
+
+        img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        buf.seek(0)
+        return buf.getvalue()
+    except Exception as exc:
+        print(f"[userstats] generate_userstats_image error: {exc}")
         return None
 
 
@@ -606,8 +782,10 @@ def get_user_level(exp: int) -> str:
         return "Legendary 🌟"
     elif exp <= 13000:
         return "Unbeaten 👑"
+    elif exp <= 26000:
+        return "Aura Farmer 🔱"
     else:
-        return "God 🔱"
+        return "God ☯️"
 
 
 def get_next_level_info(exp: int):
@@ -618,7 +796,9 @@ def get_next_level_info(exp: int):
     elif exp <= 8000:
         return "Unbeaten 👑", 8001 - exp
     elif exp <= 13000:
-        return "God 🔱", 13001 - exp
+        return "Aura Farmer 🔱", 13001 - exp
+    elif exp <= 26000:
+        return "God ☯️", 26001 - exp
     else:
         return None, 0
 
@@ -3078,8 +3258,34 @@ async def userstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats_text += f"🏆 <b>MATCH &amp; AWARDS</b>\n⛄ <b>Solo Matches:</b> {user_data.get('solo_matches', 0)}\n☃️ <b>Team Matches:</b> {user_data.get('team_matches', 0)}\n"
         stats_text += f"🎉 <b>MOTM Awards:</b> {user_data.get('motm', 0)}\nㅤ\n #elite_bots"
 
-        stats_img = "https://res.cloudinary.com/dxgfxfoog/image/upload/v1777818873/file_00000000fa6871fa8d9b30faff9899ae_hbyn9j.png"
-        await msg.reply_photo(photo=stats_img, caption=stats_text, parse_mode="HTML")
+        # Try to generate the custom userstats card image
+        target_uid = target_user.id if target_user else None
+        card_bytes = None
+        if target_uid and PIL_AVAILABLE:
+            card_bytes = await generate_userstats_image(
+                context,
+                user_id=target_uid,
+                total_runs=total_runs,
+                hs_runs=hs_runs,
+                hs_balls=hs_balls,
+                avg=avg,
+                ducks=user_data.get("ducks", 0),
+                half_centuries=user_data.get("half_centuries", 0),
+                centuries=user_data.get("centuries", 0),
+                wickets=user_data.get("wickets", 0),
+                eco=eco,
+                hat_tricks=user_data.get("hat_tricks", 0),
+            )
+
+        if card_bytes:
+            await msg.reply_photo(
+                photo=io.BytesIO(card_bytes),
+                caption=stats_text,
+                parse_mode="HTML",
+            )
+        else:
+            stats_img = "https://res.cloudinary.com/dxgfxfoog/image/upload/v1777818873/file_00000000fa6871fa8d9b30faff9899ae_hbyn9j.png"
+            await msg.reply_photo(photo=stats_img, caption=stats_text, parse_mode="HTML")
     except Exception as e:
         print(f"Error fetching stats: {e}")
         await msg.reply_text("❌ An error occurred while fetching stats.")
@@ -4694,8 +4900,35 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stats_text += f"🔹 <b>Overs Bowled:</b> {overs}.{rem_balls}\n🔹 <b>Economy:</b> {eco:.2f}\n┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n"
             stats_text += f"🏆 <b>MATCH &amp; AWARDS</b>\n🔸 <b>Solo Matches:</b> {user_data.get('solo_matches',0)}\n🔸 <b>Team Matches:</b> {user_data.get('team_matches',0)}\n"
             stats_text += f"🔸 <b>MOTM Awards:</b> {user_data.get('motm',0)}\n════════════════════"
-            stats_img = "https://res.cloudinary.com/dxgfxfoog/image/upload/v1777818873/file_00000000fa6871fa8d9b30faff9899ae_hbyn9j.png"
-            await context.bot.send_photo(chat_id=user_id, photo=stats_img, caption=stats_text, parse_mode="HTML")
+
+            # Try to generate the custom userstats card image
+            card_bytes = None
+            if PIL_AVAILABLE:
+                card_bytes = await generate_userstats_image(
+                    context,
+                    user_id=target_user.id,
+                    total_runs=total_runs,
+                    hs_runs=hs_runs,
+                    hs_balls=hs_balls,
+                    avg=avg,
+                    ducks=user_data.get("ducks", 0),
+                    half_centuries=user_data.get("half_centuries", 0),
+                    centuries=user_data.get("centuries", 0),
+                    wickets=user_data.get("wickets", 0),
+                    eco=eco,
+                    hat_tricks=user_data.get("hat_tricks", 0),
+                )
+
+            if card_bytes:
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=io.BytesIO(card_bytes),
+                    caption=stats_text,
+                    parse_mode="HTML",
+                )
+            else:
+                stats_img = "https://res.cloudinary.com/dxgfxfoog/image/upload/v1777818873/file_00000000fa6871fa8d9b30faff9899ae_hbyn9j.png"
+                await context.bot.send_photo(chat_id=user_id, photo=stats_img, caption=stats_text, parse_mode="HTML")
         except Exception as e:
             try:
                 await context.bot.send_message(chat_id=user_id, text="❌ An error occurred while fetching stats.")
