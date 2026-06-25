@@ -4871,37 +4871,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    elif query.data.startswith("transfer_yes_"):
-        # Extract old user ID from callback data
-        try:
-            old_user_id = int(query.data.split("_")[-1])
-        except (ValueError, IndexError):
-            try:
-                await query.edit_message_text("❌ Invalid transfer data.")
-            except Exception:
-                pass
-            return
-        
-        context.user_data["transfer_old_id"] = old_user_id
-        context.user_data["transfer_state"] = "new_id"
-        try:
-            await query.edit_message_text(
-                f"✅ Selected Old ID: <code>{old_user_id}</code>\n\n"
-                f"📌 Step 2️⃣: Send the <b>NEW User ID</b> (where you want to transfer the stats):",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-        return
-
-    elif query.data == "transfer_cancel":
-        context.user_data.pop("transfer_state", None)
-        context.user_data.pop("transfer_old_id", None)
-        try:
-            await query.edit_message_text("❌ Transfer cancelled. No stats were transferred.")
-        except Exception:
-            pass
-
     elif query.data == "dm_stats":
         target_user = update.effective_user
         if users_col is None:
@@ -5524,132 +5493,153 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(summary, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
                 return
 
-        # ── Private DM — Transfer Stats State Handling ────────────────────────
+    # ── Private DM — Transfer flow (owner only) ───────────────────────────
+    if chat_type == "private":
         transfer_state = context.user_data.get("transfer_state")
-        if transfer_state == "old_id":
-            # User sends old user ID
-            try:
-                old_user_id = int(text)
-            except ValueError:
-                await update.message.reply_text("❌ Please send a valid User ID (number only)!")
+
+        if transfer_state == "await_old_id":
+            if not user_input.isdigit():
+                await update.message.reply_text("❌ Please send a valid numeric user ID.")
                 return
-            
-            # Fetch old user stats
+            old_id = int(user_input)
             if users_col is None:
-                await update.message.reply_text("❌ Database connection error.")
+                await update.message.reply_text("❌ Database not connected.")
                 context.user_data.pop("transfer_state", None)
                 return
-            
-            old_user_data = await users_col.find_one({"user_id": old_user_id})
-            if not old_user_data:
+            old_data = await users_col.find_one({"user_id": old_id})
+            if not old_data:
                 await update.message.reply_text(
-                    f"❌ No stats found from this ID number: <code>{old_user_id}</code>",
+                    f"❌ <b>No stats found from ID</b> <code>{old_id}</code>.\n\nTransfer cancelled.",
                     parse_mode="HTML",
                 )
                 context.user_data.pop("transfer_state", None)
                 return
-            
-            # Show old user stats
-            hs_runs  = old_user_data.get("highest_score", {}).get("runs", 0)
-            hs_balls = old_user_data.get("highest_score", {}).get("balls", 0)
-            total_runs   = old_user_data.get("total_runs", 0)
-            balls_faced  = old_user_data.get("balls_faced", 0)
-            balls_bowled = old_user_data.get("balls_bowled", 0)
-            runs_conceded = old_user_data.get("runs_conceded", 0)
-            wickets = old_user_data.get("wickets", 0)
-            exp = old_user_data.get("exp", 0)
-            
-            stats_text = (
-                f"📊 <b>STATS TO TRANSFER</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━\n\n"
-                f"👤 <b>User ID:</b> <code>{old_user_id}</code>\n"
-                f"📝 <b>Name:</b> {old_user_data.get('first_name', 'Unknown')}\n\n"
-                f"<b>Batting Stats:</b>\n"
-                f"  Total Runs: {total_runs}\n"
-                f"  Highest Score: {hs_runs} ({hs_balls})\n"
-                f"  Balls Faced: {balls_faced}\n\n"
-                f"<b>Bowling Stats:</b>\n"
-                f"  Wickets: {wickets}\n"
-                f"  Runs Conceded: {runs_conceded}\n"
-                f"  Balls Bowled: {balls_bowled}\n\n"
-                f"<b>Other:</b>\n"
-                f"  EXP Points: {exp}\n"
-                f"  Team Matches: {old_user_data.get('team_matches', 0)}\n"
-                f"  Solo Matches: {old_user_data.get('solo_matches', 0)}\n\n"
-                f"<b>❓ Do you want to transfer this stats to another ID?</b>"
+            total_runs    = old_data.get("total_runs", 0)
+            balls_faced   = old_data.get("balls_faced", 0)
+            balls_bowled  = old_data.get("balls_bowled", 0)
+            runs_conceded = old_data.get("runs_conceded", 0)
+            eco = (runs_conceded / balls_bowled * 6) if balls_bowled > 0 else 0
+            overs = balls_bowled // 6
+            rem_b = balls_bowled % 6
+            exp = old_data.get("exp", 0)
+            hs_runs  = old_data.get("highest_score", {}).get("runs", 0)
+            hs_balls = old_data.get("highest_score", {}).get("balls", 0)
+            total_matches = old_data.get("team_matches", 0) + old_data.get("solo_matches", 0)
+            outs = max(1, total_matches - old_data.get("ducks", 0))
+            avg  = total_runs / outs if total_runs > 0 else 0
+            sr   = (total_runs / balls_faced * 100) if balls_faced > 0 else 0
+            stats_preview = (
+                f"📊 <b>STATS FOUND FOR ID</b> <code>{old_id}</code>\n"
+                f"👤 <b>Name:</b> {old_data.get('first_name', 'Unknown')}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⭐ <b>EXP:</b> {exp}\n"
+                f"🏏 <b>Total Runs:</b> {total_runs}\n"
+                f"🌀 <b>Highest Score:</b> {hs_runs} ({hs_balls}b)\n"
+                f"🎀 <b>Batting Avg:</b> {avg:.2f} | ⚡ <b>SR:</b> {sr:.2f}\n"
+                f"💥 <b>6s:</b> {old_data.get('total_6s', 0)} | <b>4s:</b> {old_data.get('total_4s', 0)}\n"
+                f"🕸️ <b>100s:</b> {old_data.get('centuries', 0)} | <b>50s:</b> {old_data.get('half_centuries', 0)}\n"
+                f"🦆 <b>Ducks:</b> {old_data.get('ducks', 0)}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👾 <b>Wickets:</b> {old_data.get('wickets', 0)} | 🌪️ <b>Hat-Tricks:</b> {old_data.get('hat_tricks', 0)}\n"
+                f"🧤 <b>Catches:</b> {old_data.get('catches', 0)}\n"
+                f"🍁 <b>Overs Bowled:</b> {overs}.{rem_b} | 💐 <b>Economy:</b> {eco:.2f}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⛄ <b>Solo Matches:</b> {old_data.get('solo_matches', 0)} | ☃️ <b>Team Matches:</b> {old_data.get('team_matches', 0)}\n"
+                f"🎉 <b>MOTM:</b> {old_data.get('motm', 0)}\n\n"
+                f"✅ Do you want to transfer these stats to another ID?\n"
+                f"<b>Send the new user ID to confirm, or send <code>no</code> to cancel.</b>"
             )
-            
-            kb = [
-                [InlineKeyboardButton("✅ Yes, Transfer", callback_data=f"transfer_yes_{old_user_id}"),
-                 InlineKeyboardButton("❌ No, Cancel",    callback_data="transfer_cancel")],
-            ]
-            
-            context.user_data["transfer_old_id"] = old_user_id
-            context.user_data["transfer_state"] = "confirm"
-            await update.message.reply_text(stats_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+            context.user_data["transfer_state"] = "await_new_id"
+            context.user_data["transfer_old_id"] = old_id
+            await update.message.reply_text(stats_preview, parse_mode="HTML")
             return
-        
-        elif transfer_state == "new_id":
-            # User sends new user ID for transfer
-            try:
-                new_user_id = int(text)
-            except ValueError:
-                await update.message.reply_text("❌ Please send a valid User ID (number only)!")
-                return
-            
-            old_user_id = context.user_data.get("transfer_old_id")
-            
-            if new_user_id == old_user_id:
-                await update.message.reply_text("❌ New ID must be different from Old ID!")
-                return
-            
-            if users_col is None:
-                await update.message.reply_text("❌ Database connection error.")
-                context.user_data.pop("transfer_state", None)
-                return
-            
-            # Fetch old user stats
-            old_user_data = await users_col.find_one({"user_id": old_user_id})
-            if not old_user_data:
-                await update.message.reply_text(f"❌ Old user stats not found anymore!")
-                context.user_data.pop("transfer_state", None)
-                return
-            
-            # Transfer: Replace/Insert all stats to new ID, delete old ID
-            try:
-                # Create document for new user with all stats from old user
-                new_user_doc = old_user_data.copy()
-                new_user_doc["user_id"] = new_user_id
-                
-                # Upsert new user with transferred stats
-                await users_col.update_one(
-                    {"user_id": new_user_id},
-                    {"$set": new_user_doc},
-                    upsert=True
-                )
-                
-                # Delete old user stats
-                await users_col.delete_one({"user_id": old_user_id})
-                
-                await update.message.reply_text(
-                    f"✅ <b>STATS TRANSFERRED SUCCESSFULLY!</b>\n\n"
-                    f"📌 Old ID: <code>{old_user_id}</code> (DELETED)\n"
-                    f"📌 New ID: <code>{new_user_id}</code> (UPDATED)\n\n"
-                    f"All stats, exp, rankings, and data have been transferred. "
-                    f"New runs will be added to the new ID.",
-                    parse_mode="HTML",
-                )
-                
-                # Clear transfer state
+
+        elif transfer_state == "await_new_id":
+            if user_input.lower() == "no":
                 context.user_data.pop("transfer_state", None)
                 context.user_data.pop("transfer_old_id", None)
-                
-            except Exception as e:
-                await update.message.reply_text(f"❌ Transfer failed: {str(e)}")
+                await update.message.reply_text("❌ Transfer cancelled.")
+                return
+            if not user_input.isdigit():
+                await update.message.reply_text(
+                    "❌ Please send a valid numeric user ID or <code>no</code> to cancel.",
+                    parse_mode="HTML",
+                )
+                return
+            new_id = int(user_input)
+            old_id = context.user_data.get("transfer_old_id")
+            if not old_id:
+                await update.message.reply_text("❌ Session expired. Please use /transfer again.")
                 context.user_data.pop("transfer_state", None)
+                return
+            if new_id == old_id:
+                await update.message.reply_text("❌ New ID cannot be the same as old ID!")
+                return
+            if users_col is None:
+                await update.message.reply_text("❌ Database not connected.")
+                context.user_data.pop("transfer_state", None)
+                context.user_data.pop("transfer_old_id", None)
+                return
+            old_data = await users_col.find_one({"user_id": old_id})
+            if not old_data:
+                await update.message.reply_text(
+                    f"❌ <b>No stats found from ID</b> <code>{old_id}</code>. Transfer failed.",
+                    parse_mode="HTML",
+                )
+                context.user_data.pop("transfer_state", None)
+                context.user_data.pop("transfer_old_id", None)
+                return
+            transfer_fields = {
+                "exp":                 old_data.get("exp", 0),
+                "weekly_runs":         old_data.get("weekly_runs", 0),
+                "weekly_wickets":      old_data.get("weekly_wickets", 0),
+                "weekly_conceded":     old_data.get("weekly_conceded", 0),
+                "weekly_balls_bowled": old_data.get("weekly_balls_bowled", 0),
+                "weekly_balls_faced":  old_data.get("weekly_balls_faced", 0),
+                "highest_score":       old_data.get("highest_score", {"runs": 0, "balls": 0}),
+                "total_runs":          old_data.get("total_runs", 0),
+                "balls_faced":         old_data.get("balls_faced", 0),
+                "solo_matches":        old_data.get("solo_matches", 0),
+                "team_matches":        old_data.get("team_matches", 0),
+                "total_6s":            old_data.get("total_6s", 0),
+                "total_4s":            old_data.get("total_4s", 0),
+                "centuries":           old_data.get("centuries", 0),
+                "half_centuries":      old_data.get("half_centuries", 0),
+                "ducks":               old_data.get("ducks", 0),
+                "balls_bowled":        old_data.get("balls_bowled", 0),
+                "runs_conceded":       old_data.get("runs_conceded", 0),
+                "wickets":             old_data.get("wickets", 0),
+                "motm":                old_data.get("motm", 0),
+                "hat_tricks":          old_data.get("hat_tricks", 0),
+                "catches":             old_data.get("catches", 0),
+            }
+            new_data = await users_col.find_one({"user_id": new_id})
+            if new_data:
+                await users_col.update_one(
+                    {"user_id": new_id},
+                    {"$set": transfer_fields},
+                )
+            else:
+                await users_col.insert_one({
+                    "user_id":    new_id,
+                    "first_name": old_data.get("first_name", "Unknown"),
+                    "username":   old_data.get("username", ""),
+                    **transfer_fields,
+                })
+            await users_col.delete_one({"user_id": old_id})
+            context.user_data.pop("transfer_state", None)
+            context.user_data.pop("transfer_old_id", None)
+            await update.message.reply_text(
+                f"✅ <b>Stats Transferred!</b>\n\n"
+                f"📤 <b>From ID:</b> <code>{old_id}</code>\n"
+                f"📥 <b>To ID:</b> <code>{new_id}</code>\n\n"
+                f"All stats (EXP, runs, wickets, matches, hat-tricks, etc.) have been successfully transferred.\n"
+                f"Old ID stats have been deleted from the database. ✅",
+                parse_mode="HTML",
+            )
             return
 
-
+    if not user_input or not user_input.lstrip("-").isdigit():
         return
     if not user_input.isdigit():
         return
@@ -7025,10 +7015,78 @@ async def resetweekly_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ---------------------------------------------------------------------------
-# /transfer command — Owner only: transfer all user stats to another ID
+# /ownerhelp command — Owner only: list all owner-only commands
 # ---------------------------------------------------------------------------
 
+async def hosts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /hosts — Owner only.
+    Lists all currently permitted hosts with their status (active / expired).
+    """
+    if not update.message:
+        return
+    if update.effective_user is None or update.effective_user.id not in OWNER_IDS:
+        await update.message.reply_text("❌ Owner only command.")
+        return
+    if permitted_hosts_col is None:
+        await update.message.reply_text("❌ Database not connected.")
+        return
+    try:
+        docs = await permitted_hosts_col.find({}).to_list(length=500)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to fetch hosts: {e}")
+        return
+    if not docs:
+        await update.message.reply_text("📋 No permitted hosts found. Use /permit to add one.")
+        return
+    now = time.time()
+    lines = ["🔑 <b>PERMITTED HOSTS LIST</b>\n"]
+    active_count = 0
+    expired_count = 0
+    for i, doc in enumerate(docs, 1):
+        uid      = doc.get("user_id", "?")
+        name     = doc.get("name", "Unknown")
+        username = doc.get("username")
+        expires  = doc.get("expires")
+        if expires is None:
+            status = "♾️ Lifetime"
+            active_count += 1
+        elif now < expires:
+            remaining = expires - now
+            if remaining >= 86400:
+                label = f"{int(remaining // 86400)}d {int((remaining % 86400) // 3600)}h"
+            elif remaining >= 3600:
+                label = f"{int(remaining // 3600)}h {int((remaining % 3600) // 60)}m"
+            else:
+                label = f"{int(remaining // 60)}m"
+            status = f"✅ Active — {label} left"
+            active_count += 1
+        else:
+            status = "❌ Expired"
+            expired_count += 1
+        uname_part = f" @{username}" if username else ""
+        lines.append(
+            f"{i}. <a href='tg://user?id={uid}'>{name}</a>{uname_part} "
+            f"(<code>{uid}</code>)\n"
+            f"   ┗ {status}"
+        )
+    lines.append(
+        f"\n📊 <b>Total:</b> {len(docs)} | ✅ Active: {active_count} | ❌ Expired: {expired_count}"
+    )
+    text = "\n".join(lines)
+    if len(text) > 4096:
+        text = text[:4090] + "\n..."
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
 async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /transfer — Owner only.
+    Multi-step flow to transfer all stats from one user ID to another.
+    Step 1: Owner sends /transfer → bot asks for old user ID.
+    Step 2: Owner sends old ID → bot shows stats, asks for new ID.
+    Step 3: Owner sends new ID → bot transfers all stats and deletes old record.
+    """
     if not update.message:
         return
     if update.effective_user is None or update.effective_user.id not in OWNER_IDS:
@@ -7037,18 +7095,15 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if users_col is None:
         await update.message.reply_text("❌ Database not connected.")
         return
-    
-    context.user_data["transfer_state"] = "old_id"
+    context.user_data["transfer_state"] = "await_old_id"
+    context.user_data.pop("transfer_old_id", None)
     await update.message.reply_text(
-        "🔄 <b>STATS TRANSFER TOOL</b>\n\n"
-        "📌 Step 1️⃣: Send the <b>OLD User ID</b> (the user whose stats you want to transfer):",
+        "🔄 <b>STATS TRANSFER</b>\n\n"
+        "Send me the <b>old user ID</b> whose stats you want to transfer:\n"
+        "(Send <code>no</code> at any step to cancel)",
         parse_mode="HTML",
     )
 
-
-# ---------------------------------------------------------------------------
-# /ownerhelp command — Owner only: list all owner-only commands
-# ---------------------------------------------------------------------------
 
 async def ownerhelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -7068,7 +7123,8 @@ async def ownerhelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /banlist — View all currently banned users\n\n"
         "🔑 <b>Permissions</b>\n"
         "  /permit — Grant a user host permission (optional duration)\n"
-        "  /rpermit — Revoke a user's host permission\n\n"
+        "  /rpermit — Revoke a user's host permission\n"
+        "  /hosts — List all permitted hosts with their status\n\n"
         "📊 <b>Stats &amp; Info</b>\n"
         "  /botstats — View bot-wide statistics\n"
         "  /botgroups — List all groups the bot is in\n"
@@ -7077,6 +7133,8 @@ async def ownerhelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /penalty [Team] [Balls] [Runs] — Apply a penalty in a TEAM match\n\n"
         "🔄 <b>Leaderboard</b>\n"
         "  /resetweekly — Reset weekly leaderboard stats to 0 for all players\n\n"
+        "🔁 <b>Stats Transfer</b>\n"
+        "  /transfer — Transfer all stats from one user ID to another\n\n"
         "🎪 <b>Tournament</b>\n"
         "  /tournament — Manage tournaments\n"
         "  /regisopen — Open team registration\n"
@@ -7296,9 +7354,10 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("blockuser",   blockuser_command))
     app.add_handler(CommandHandler("unbanuser",   unbanuser_command))
     app.add_handler(CommandHandler("banlist",     banlist_command))
-    app.add_handler(CommandHandler("transfer",    transfer_command))
     app.add_handler(CommandHandler("shift",       shift_command))
     app.add_handler(CommandHandler("resetweekly", resetweekly_command))
+    app.add_handler(CommandHandler("transfer",    transfer_command))
+    app.add_handler(CommandHandler("hosts",       hosts_command))
     app.add_handler(CommandHandler("ownerhelp",   ownerhelp_command))
 
     app.add_handler(CallbackQueryHandler(button_click))
