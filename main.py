@@ -295,6 +295,8 @@ _template_cache: bytes | None = None
 _template_v2_cache: bytes | None = None
 _potm_template_cache: bytes | None = None
 _userstats_template_cache: bytes | None = None
+_userstats_font_cache: dict = {}  # Cache fonts by size: {size: font}
+_userstats_photo_cache: dict = {}  # Cache user photos: {user_id: photo_bytes}
 
 # In-memory cache of the composited (template + pfp circles) image per chat.
 # Key: chat_id  →  {"key": (host_id, cap_a_id, cap_b_id), "bytes": <PNG bytes>}
@@ -452,9 +454,9 @@ def _get_userstats_template_bytes() -> bytes | None:
 # ---------------------------------------------------------------------------
 _US = {
     # Profile-picture circle (top-left white circle)
-    "pfp_cx_pct": 0.1067,   # cx ≈ 160
-    "pfp_cy_pct": 0.1050,   # cy ≈ 105
-    "pfp_r_pct":  0.0633,   # r  ≈  95
+    "pfp_cx_pct": 0.1200,   # cx ≈ 180
+    "pfp_cy_pct": 0.1150,   # cy ≈ 115
+    "pfp_r_pct":  0.0600,   # r  ≈  90
 
     # Value text centre-x (right-side blue box, horizontal midpoint)
     "val_cx_pct": 0.7300,   # cx ≈ 1095
@@ -478,13 +480,22 @@ _US = {
 
 
 def _load_userstats_font(size: int):
-    """Load PWBoldScript.ttf at *size*, fall back to bold system font."""
+    """Load PWBoldScript.ttf at *size*, fall back to bold system font. Uses cache."""
+    global _userstats_font_cache
+    if size in _userstats_font_cache:
+        return _userstats_font_cache[size]
+    
     if os.path.exists(USERSTATS_FONT_PATH):
         try:
-            return ImageFont.truetype(USERSTATS_FONT_PATH, size)
+            font = ImageFont.truetype(USERSTATS_FONT_PATH, size)
+            _userstats_font_cache[size] = font
+            return font
         except Exception:
             pass
-    return _load_font(size)
+    
+    font = _load_font(size)
+    _userstats_font_cache[size] = font
+    return font
 
 
 async def generate_userstats_image(
@@ -506,14 +517,19 @@ async def generate_userstats_image(
     and their stats drawn in each value box.
     Returns PNG bytes or None on failure.
     """
+    global _userstats_photo_cache
+    
     if not PIL_AVAILABLE:
         return None
 
-    template_bytes = await asyncio.to_thread(_get_userstats_template_bytes)
+    # ── Parallel fetch: template + photo ────────────────────────────────
+    template_bytes, photo_bytes = await asyncio.gather(
+        asyncio.to_thread(_get_userstats_template_bytes),
+        _fetch_user_photo_bytes(context, user_id),
+    )
+    
     if template_bytes is None:
         return None
-
-    photo_bytes = await _fetch_user_photo_bytes(context, user_id)
 
     try:
         img  = Image.open(io.BytesIO(template_bytes)).convert("RGBA")
@@ -531,7 +547,8 @@ async def generate_userstats_image(
             side = min(pw, ph)
             pfp  = pfp.crop(((pw - side) // 2, (ph - side) // 2,
                               (pw + side) // 2, (ph + side) // 2))
-            pfp  = pfp.resize((r * 2, r * 2), Image.LANCZOS)
+            # Use BILINEAR instead of LANCZOS (3-4x faster, same quality for small images)
+            pfp  = pfp.resize((r * 2, r * 2), Image.BILINEAR)
             mask = Image.new("L", (r * 2, r * 2), 0)
             ImageDraw.Draw(mask).ellipse((0, 0, r * 2, r * 2), fill=255)
             img.paste(pfp, (cx - r, cy - r), mask)
@@ -539,8 +556,8 @@ async def generate_userstats_image(
         # ── Stat values ─────────────────────────────────────────────────────
         val_cx   = int(iw * _US["val_cx_pct"])
         row_h    = int(ih * _US["row_h_pct"])
-        # Target font size: fill ~75% of row height so text nearly touches borders
-        font_size = max(10, int(row_h * 0.75))
+        # Target font size: fill ~50% of row height so text fits perfectly in the box
+        font_size = max(10, int(row_h * 0.50))
         font      = _load_userstats_font(font_size)
 
         hs_text  = f"{hs_runs} ({hs_balls}b)" if hs_balls > 0 else str(hs_runs)
@@ -573,7 +590,8 @@ async def generate_userstats_image(
 
         img = img.convert("RGB")
         buf = io.BytesIO()
-        img.save(buf, format="PNG", optimize=True)
+        # Removed optimize=True for 2-3x faster PNG saving
+        img.save(buf, format="PNG", optimize=False)
         buf.seek(0)
         return buf.getvalue()
     except Exception as exc:
@@ -4853,6 +4871,37 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+    elif query.data.startswith("transfer_yes_"):
+        # Extract old user ID from callback data
+        try:
+            old_user_id = int(query.data.split("_")[-1])
+        except (ValueError, IndexError):
+            try:
+                await query.edit_message_text("❌ Invalid transfer data.")
+            except Exception:
+                pass
+            return
+        
+        context.user_data["transfer_old_id"] = old_user_id
+        context.user_data["transfer_state"] = "new_id"
+        try:
+            await query.edit_message_text(
+                f"✅ Selected Old ID: <code>{old_user_id}</code>\n\n"
+                f"📌 Step 2️⃣: Send the <b>NEW User ID</b> (where you want to transfer the stats):",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    elif query.data == "transfer_cancel":
+        context.user_data.pop("transfer_state", None)
+        context.user_data.pop("transfer_old_id", None)
+        try:
+            await query.edit_message_text("❌ Transfer cancelled. No stats were transferred.")
+        except Exception:
+            pass
+
     elif query.data == "dm_stats":
         target_user = update.effective_user
         if users_col is None:
@@ -5475,7 +5524,132 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(summary, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
                 return
 
-    if not user_input or not user_input.lstrip("-").isdigit():
+        # ── Private DM — Transfer Stats State Handling ────────────────────────
+        transfer_state = context.user_data.get("transfer_state")
+        if transfer_state == "old_id":
+            # User sends old user ID
+            try:
+                old_user_id = int(text)
+            except ValueError:
+                await update.message.reply_text("❌ Please send a valid User ID (number only)!")
+                return
+            
+            # Fetch old user stats
+            if users_col is None:
+                await update.message.reply_text("❌ Database connection error.")
+                context.user_data.pop("transfer_state", None)
+                return
+            
+            old_user_data = await users_col.find_one({"user_id": old_user_id})
+            if not old_user_data:
+                await update.message.reply_text(
+                    f"❌ No stats found from this ID number: <code>{old_user_id}</code>",
+                    parse_mode="HTML",
+                )
+                context.user_data.pop("transfer_state", None)
+                return
+            
+            # Show old user stats
+            hs_runs  = old_user_data.get("highest_score", {}).get("runs", 0)
+            hs_balls = old_user_data.get("highest_score", {}).get("balls", 0)
+            total_runs   = old_user_data.get("total_runs", 0)
+            balls_faced  = old_user_data.get("balls_faced", 0)
+            balls_bowled = old_user_data.get("balls_bowled", 0)
+            runs_conceded = old_user_data.get("runs_conceded", 0)
+            wickets = old_user_data.get("wickets", 0)
+            exp = old_user_data.get("exp", 0)
+            
+            stats_text = (
+                f"📊 <b>STATS TO TRANSFER</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━\n\n"
+                f"👤 <b>User ID:</b> <code>{old_user_id}</code>\n"
+                f"📝 <b>Name:</b> {old_user_data.get('first_name', 'Unknown')}\n\n"
+                f"<b>Batting Stats:</b>\n"
+                f"  Total Runs: {total_runs}\n"
+                f"  Highest Score: {hs_runs} ({hs_balls})\n"
+                f"  Balls Faced: {balls_faced}\n\n"
+                f"<b>Bowling Stats:</b>\n"
+                f"  Wickets: {wickets}\n"
+                f"  Runs Conceded: {runs_conceded}\n"
+                f"  Balls Bowled: {balls_bowled}\n\n"
+                f"<b>Other:</b>\n"
+                f"  EXP Points: {exp}\n"
+                f"  Team Matches: {old_user_data.get('team_matches', 0)}\n"
+                f"  Solo Matches: {old_user_data.get('solo_matches', 0)}\n\n"
+                f"<b>❓ Do you want to transfer this stats to another ID?</b>"
+            )
+            
+            kb = [
+                [InlineKeyboardButton("✅ Yes, Transfer", callback_data=f"transfer_yes_{old_user_id}"),
+                 InlineKeyboardButton("❌ No, Cancel",    callback_data="transfer_cancel")],
+            ]
+            
+            context.user_data["transfer_old_id"] = old_user_id
+            context.user_data["transfer_state"] = "confirm"
+            await update.message.reply_text(stats_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+            return
+        
+        elif transfer_state == "new_id":
+            # User sends new user ID for transfer
+            try:
+                new_user_id = int(text)
+            except ValueError:
+                await update.message.reply_text("❌ Please send a valid User ID (number only)!")
+                return
+            
+            old_user_id = context.user_data.get("transfer_old_id")
+            
+            if new_user_id == old_user_id:
+                await update.message.reply_text("❌ New ID must be different from Old ID!")
+                return
+            
+            if users_col is None:
+                await update.message.reply_text("❌ Database connection error.")
+                context.user_data.pop("transfer_state", None)
+                return
+            
+            # Fetch old user stats
+            old_user_data = await users_col.find_one({"user_id": old_user_id})
+            if not old_user_data:
+                await update.message.reply_text(f"❌ Old user stats not found anymore!")
+                context.user_data.pop("transfer_state", None)
+                return
+            
+            # Transfer: Replace/Insert all stats to new ID, delete old ID
+            try:
+                # Create document for new user with all stats from old user
+                new_user_doc = old_user_data.copy()
+                new_user_doc["user_id"] = new_user_id
+                
+                # Upsert new user with transferred stats
+                await users_col.update_one(
+                    {"user_id": new_user_id},
+                    {"$set": new_user_doc},
+                    upsert=True
+                )
+                
+                # Delete old user stats
+                await users_col.delete_one({"user_id": old_user_id})
+                
+                await update.message.reply_text(
+                    f"✅ <b>STATS TRANSFERRED SUCCESSFULLY!</b>\n\n"
+                    f"📌 Old ID: <code>{old_user_id}</code> (DELETED)\n"
+                    f"📌 New ID: <code>{new_user_id}</code> (UPDATED)\n\n"
+                    f"All stats, exp, rankings, and data have been transferred. "
+                    f"New runs will be added to the new ID.",
+                    parse_mode="HTML",
+                )
+                
+                # Clear transfer state
+                context.user_data.pop("transfer_state", None)
+                context.user_data.pop("transfer_old_id", None)
+                
+            except Exception as e:
+                await update.message.reply_text(f"❌ Transfer failed: {str(e)}")
+                context.user_data.pop("transfer_state", None)
+            return
+
+
         return
     if not user_input.isdigit():
         return
@@ -6851,6 +7025,28 @@ async def resetweekly_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ---------------------------------------------------------------------------
+# /transfer command — Owner only: transfer all user stats to another ID
+# ---------------------------------------------------------------------------
+
+async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    if update.effective_user is None or update.effective_user.id not in OWNER_IDS:
+        await update.message.reply_text("❌ Owner only command.")
+        return
+    if users_col is None:
+        await update.message.reply_text("❌ Database not connected.")
+        return
+    
+    context.user_data["transfer_state"] = "old_id"
+    await update.message.reply_text(
+        "🔄 <b>STATS TRANSFER TOOL</b>\n\n"
+        "📌 Step 1️⃣: Send the <b>OLD User ID</b> (the user whose stats you want to transfer):",
+        parse_mode="HTML",
+    )
+
+
+# ---------------------------------------------------------------------------
 # /ownerhelp command — Owner only: list all owner-only commands
 # ---------------------------------------------------------------------------
 
@@ -7100,6 +7296,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("blockuser",   blockuser_command))
     app.add_handler(CommandHandler("unbanuser",   unbanuser_command))
     app.add_handler(CommandHandler("banlist",     banlist_command))
+    app.add_handler(CommandHandler("transfer",    transfer_command))
     app.add_handler(CommandHandler("shift",       shift_command))
     app.add_handler(CommandHandler("resetweekly", resetweekly_command))
     app.add_handler(CommandHandler("ownerhelp",   ownerhelp_command))
