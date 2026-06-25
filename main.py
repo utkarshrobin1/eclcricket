@@ -449,33 +449,36 @@ def _get_userstats_template_bytes() -> bytes | None:
 
 
 # ---------------------------------------------------------------------------
-# User Stats card coordinates  (for 1500×1000 template).
+# User Stats card coordinates — pixel-measured on the 1536×1024 template.
 # All _pct values are fractions of image width/height so any size works.
 # ---------------------------------------------------------------------------
 _US = {
     # Profile-picture circle (top-left white circle)
-    "pfp_cx_pct": 0.1200,   # cx ≈ 180
-    "pfp_cy_pct": 0.1150,   # cy ≈ 115
-    "pfp_r_pct":  0.0600,   # r  ≈  90
+    # Re-measured on 1536×1024: white fill inner disk centre cx=228, cy=174, r=88
+    # (r intentionally 8 px inside the white boundary so the glow border stays visible)
+    "pfp_cx_pct": 0.1484,   # cx = 228 / 1536
+    "pfp_cy_pct": 0.1699,   # cy = 174 / 1024
+    "pfp_r_pct":  0.0573,   # r  =  88 / 1536  (fraction of image WIDTH)
 
-    # Value text centre-x (right-side blue box, horizontal midpoint)
-    "val_cx_pct": 0.7300,   # cx ≈ 1095
+    # Value text centre-x — midpoint of right-side value box (x≈1055 on 1536)
+    "val_cx_pct": 0.6875,   # cx = 1055 / 1536
 
-    # 9 data rows — vertical centre of each value box (fraction of height)
+    # 9 data rows — vertical centre of each value box, measured at x=1075
+    # on the 1536×1024 template (each box ~65px tall, ~10px gap between rows)
     "row_cy_pcts": [
-        0.251,   # TOTAL RUNS
-        0.334,   # HIGHEST RUNS
-        0.417,   # BATTING AVG
-        0.500,   # DUCKS
-        0.583,   # TOTAL 50s
-        0.666,   # TOTAL 100s
-        0.749,   # TOTAL WICKETS
-        0.832,   # CAREER ECONOMY
-        0.915,   # HATTRICKS
+        0.316,   # TOTAL RUNS      center ≈ y=324 / 1024
+        0.385,   # HIGHEST RUNS    center ≈ y=394 / 1024
+        0.453,   # BATTING AVG     center ≈ y=464 / 1024
+        0.521,   # DUCKS           center ≈ y=534 / 1024
+        0.590,   # TOTAL 50s       center ≈ y=604 / 1024
+        0.658,   # TOTAL 100s      center ≈ y=674 / 1024
+        0.727,   # TOTAL WICKETS   center ≈ y=744 / 1024
+        0.795,   # CAREER ECONOMY  center ≈ y=814 / 1024
+        0.863,   # HATTRICKS       center ≈ y=884 / 1024
     ],
 
-    # Row height fraction (used to size the font so text nearly fills the box)
-    "row_h_pct": 0.083,
+    # Actual row box height fraction (65px / 1024 = 0.0635)
+    "row_h_pct": 0.0635,
 }
 
 
@@ -556,8 +559,8 @@ async def generate_userstats_image(
         # ── Stat values ─────────────────────────────────────────────────────
         val_cx   = int(iw * _US["val_cx_pct"])
         row_h    = int(ih * _US["row_h_pct"])
-        # Target font size: fill ~50% of row height so text fits perfectly in the box
-        font_size = max(10, int(row_h * 0.50))
+        # Target font size: 32% of row height → ~21 px on the 1536×1024 template
+        font_size = max(10, int(row_h * 0.32))
         font      = _load_userstats_font(font_size)
 
         hs_text  = f"{hs_runs} ({hs_balls}b)" if hs_balls > 0 else str(hs_runs)
@@ -2459,8 +2462,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         keyboard = []
                         if not game.get("special_used_this_over") and game.get("mode") != "TEAM":
                             keyboard.append([InlineKeyboardButton("🎯 Try for yorker 🎯", callback_data=f"special_{group_id}")])
+                        _br = "0-6" if game.get("mode") == "TEAM" else "1-6"
+                        _hint = f"🥎 <b>Your Turn to Bowl!</b>\nType {_br}{'!' if game.get('mode') == 'TEAM' else ' or Try for yorker! 🤔'}👇"
                         await update.message.reply_text(
-                            "🥎 <b>Your Turn to Bowl!</b>\nType 1-6 or Try for yorker! 🤔👇",
+                            _hint,
                             reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
                             parse_mode="HTML",
                         )
@@ -3888,11 +3893,12 @@ async def trigger_bowl(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     url          = f"https://t.me/{_bot_username}"
     free_hit_tag = "🚀 <b>FREE HIT ACTIVE!!</b>\n" if game.get("is_free_hit") else ""
 
+    _bowl_range = "0 to 6" if game.get("mode") == "TEAM" else "1 to 6"
     dm_text  = (
         f"🏏 <b>Match in Progress!</b>\n\n"
         f"🏏 Batter: <b>{batter['name']}</b> ({batter.get('runs', 0)} off {batter.get('balls_faced', 0)})\n"
         f"🥎 Over Status: {over_info}.\n\n"
-        "👉 <b>Your Turn to Bowl!</b> Type a number from 1 to 6."
+        f"👉 <b>Your Turn to Bowl!</b> Type a number from {_bowl_range}."
     )
     keyboard = []
     if not game.get("special_used_this_over") and game.get("mode") != "TEAM":
@@ -5498,18 +5504,29 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         transfer_state = context.user_data.get("transfer_state")
 
         if transfer_state == "await_old_id":
-            if not user_input.isdigit():
-                await update.message.reply_text("❌ Please send a valid numeric user ID.")
+            try:
+                old_id = int(user_input.strip())
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ <b>Invalid ID.</b> Please send a plain numeric user ID (e.g. <code>123456789</code>).",
+                    parse_mode="HTML",
+                )
                 return
-            old_id = int(user_input)
             if users_col is None:
                 await update.message.reply_text("❌ Database not connected.")
                 context.user_data.pop("transfer_state", None)
                 return
+            # Try int lookup first; fall back to string-typed ID (older records)
             old_data = await users_col.find_one({"user_id": old_id})
             if not old_data:
+                old_data = await users_col.find_one({"user_id": str(old_id)})
+            if not old_data:
                 await update.message.reply_text(
-                    f"❌ <b>No stats found from ID</b> <code>{old_id}</code>.\n\nTransfer cancelled.",
+                    f"❌ <b>No stats found for ID</b> <code>{old_id}</code>.\n\n"
+                    f"Possible reasons:\n"
+                    f"• This user has never played a match\n"
+                    f"• The ID was entered incorrectly\n\n"
+                    f"Transfer cancelled.",
                     parse_mode="HTML",
                 )
                 context.user_data.pop("transfer_state", None)
@@ -5560,30 +5577,37 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop("transfer_old_id", None)
                 await update.message.reply_text("❌ Transfer cancelled.")
                 return
-            if not user_input.isdigit():
+            try:
+                new_id = int(user_input.strip())
+            except ValueError:
                 await update.message.reply_text(
-                    "❌ Please send a valid numeric user ID or <code>no</code> to cancel.",
+                    "❌ <b>Invalid ID.</b> Please send a plain numeric user ID or <code>no</code> to cancel.",
                     parse_mode="HTML",
                 )
                 return
-            new_id = int(user_input)
             old_id = context.user_data.get("transfer_old_id")
             if not old_id:
                 await update.message.reply_text("❌ Session expired. Please use /transfer again.")
                 context.user_data.pop("transfer_state", None)
                 return
             if new_id == old_id:
-                await update.message.reply_text("❌ New ID cannot be the same as old ID!")
+                await update.message.reply_text(
+                    "❌ New ID cannot be the same as old ID. Please send a different ID."
+                )
                 return
             if users_col is None:
                 await update.message.reply_text("❌ Database not connected.")
                 context.user_data.pop("transfer_state", None)
                 context.user_data.pop("transfer_old_id", None)
                 return
+            # Try int lookup; fall back to string-typed ID for older records
             old_data = await users_col.find_one({"user_id": old_id})
             if not old_data:
+                old_data = await users_col.find_one({"user_id": str(old_id)})
+            if not old_data:
                 await update.message.reply_text(
-                    f"❌ <b>No stats found from ID</b> <code>{old_id}</code>. Transfer failed.",
+                    f"❌ <b>Source stats for ID</b> <code>{old_id}</code> <b>no longer found.</b>\n"
+                    f"They may have been deleted. Transfer failed.",
                     parse_mode="HTML",
                 )
                 context.user_data.pop("transfer_state", None)
@@ -5669,8 +5693,12 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if user_id != bowler["id"]:
             return
-        if val < 1 or val > 6:
-            await update.message.reply_text("❌ Bowlers can only bowl numbers from 1 to 6!")
+        # In TEAM mode bowlers may send 0 (0 vs 0 = wicket); SOLO keeps 1-6
+        is_team = game.get("mode") == "TEAM"
+        min_bowl = 0 if is_team else 1
+        if val < min_bowl or val > 6:
+            rng = "0 to 6" if is_team else "1 to 6"
+            await update.message.reply_text(f"❌ Bowlers can only bowl numbers from {rng}!")
             return
 
         # Spam-free check
@@ -7082,10 +7110,9 @@ async def hosts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /transfer — Owner only.
-    Multi-step flow to transfer all stats from one user ID to another.
-    Step 1: Owner sends /transfer → bot asks for old user ID.
-    Step 2: Owner sends old ID → bot shows stats, asks for new ID.
-    Step 3: Owner sends new ID → bot transfers all stats and deletes old record.
+    Usage:
+      /transfer @username1 @username2  — transfer stats directly by username (one step)
+      /transfer                        — start interactive multi-step ID flow
     """
     if not update.message:
         return
@@ -7095,6 +7122,102 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if users_col is None:
         await update.message.reply_text("❌ Database not connected.")
         return
+
+    args = context.args or []
+
+    # ── Inline mode: /transfer @user1 @user2 ──────────────────────────────
+    if len(args) == 2:
+        raw_from = args[0].lstrip("@")
+        raw_to   = args[1].lstrip("@")
+
+        async def _resolve(uname):
+            doc = await users_col.find_one({"username": uname})
+            if not doc:
+                doc = await users_col.find_one({"username": f"@{uname}"})
+            if doc:
+                return doc.get("user_id"), doc
+            return None, None
+
+        from_id, from_data = await _resolve(raw_from)
+        if not from_data:
+            await update.message.reply_text(
+                f"❌ <b>No stats found for</b> @{raw_from}.\n"
+                f"Make sure they have played at least one match.",
+                parse_mode="HTML",
+            )
+            return
+
+        to_id, to_data = await _resolve(raw_to)
+        if not to_data:
+            await update.message.reply_text(
+                f"❌ <b>No record found for</b> @{raw_to}.\n"
+                f"Make sure they have joined at least one match so a record exists.",
+                parse_mode="HTML",
+            )
+            return
+
+        if from_id == to_id:
+            await update.message.reply_text("❌ Both usernames resolve to the same user!")
+            return
+
+        transfer_fields = {
+            "exp":                 from_data.get("exp", 0),
+            "weekly_runs":         from_data.get("weekly_runs", 0),
+            "weekly_wickets":      from_data.get("weekly_wickets", 0),
+            "weekly_conceded":     from_data.get("weekly_conceded", 0),
+            "weekly_balls_bowled": from_data.get("weekly_balls_bowled", 0),
+            "weekly_balls_faced":  from_data.get("weekly_balls_faced", 0),
+            "highest_score":       from_data.get("highest_score", {"runs": 0, "balls": 0}),
+            "total_runs":          from_data.get("total_runs", 0),
+            "balls_faced":         from_data.get("balls_faced", 0),
+            "solo_matches":        from_data.get("solo_matches", 0),
+            "team_matches":        from_data.get("team_matches", 0),
+            "total_6s":            from_data.get("total_6s", 0),
+            "total_4s":            from_data.get("total_4s", 0),
+            "centuries":           from_data.get("centuries", 0),
+            "half_centuries":      from_data.get("half_centuries", 0),
+            "ducks":               from_data.get("ducks", 0),
+            "balls_bowled":        from_data.get("balls_bowled", 0),
+            "runs_conceded":       from_data.get("runs_conceded", 0),
+            "wickets":             from_data.get("wickets", 0),
+            "motm":                from_data.get("motm", 0),
+            "hat_tricks":          from_data.get("hat_tricks", 0),
+            "catches":             from_data.get("catches", 0),
+        }
+
+        if to_data:
+            await users_col.update_one({"user_id": to_id}, {"$set": transfer_fields})
+        else:
+            await users_col.insert_one({
+                "user_id":    to_id,
+                "first_name": from_data.get("first_name", "Unknown"),
+                "username":   raw_to,
+                **transfer_fields,
+            })
+        await users_col.delete_one({"user_id": from_id})
+
+        await update.message.reply_text(
+            f"✅ <b>Stats Transferred!</b>\n\n"
+            f"📤 <b>From:</b> @{raw_from} (<code>{from_id}</code>)\n"
+            f"📥 <b>To:</b> @{raw_to} (<code>{to_id}</code>)\n\n"
+            f"All stats (EXP, runs, wickets, matches, hat-tricks, etc.) "
+            f"have been successfully transferred.\n"
+            f"@{raw_from}'s stats have been deleted from the database. ✅",
+            parse_mode="HTML",
+        )
+        return
+
+    # ── Wrong number of args: show usage hint ─────────────────────────────
+    if len(args) == 1:
+        await update.message.reply_text(
+            "❌ Please provide <b>both</b> usernames:\n"
+            "<code>/transfer @username1 @username2</code>\n\n"
+            "Or use <code>/transfer</code> alone to start the interactive ID flow.",
+            parse_mode="HTML",
+        )
+        return
+
+    # ── Interactive mode: no args → multi-step flow ───────────────────────
     context.user_data["transfer_state"] = "await_old_id"
     context.user_data.pop("transfer_old_id", None)
     await update.message.reply_text(
