@@ -559,8 +559,8 @@ async def generate_userstats_image(
         # ── Stat values ─────────────────────────────────────────────────────
         val_cx   = int(iw * _US["val_cx_pct"])
         row_h    = int(ih * _US["row_h_pct"])
-        # Target font size: 32% of row height → ~21 px on the 1536×1024 template
-        font_size = max(10, int(row_h * 0.32))
+        # Target font size: 35% of row height → ~23 px on the 1536×1024 template
+        font_size = max(10, int(row_h * 0.35))
         font      = _load_userstats_font(font_size)
 
         hs_text  = f"{hs_runs} ({hs_balls}b)" if hs_balls > 0 else str(hs_runs)
@@ -2426,6 +2426,53 @@ async def spamfree_timeout(context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def team_a_naming_timeout(context: ContextTypes.DEFAULT_TYPE):
+    job     = context.job
+    chat_id = job.data["chat_id"]
+    game    = context.bot_data.get(chat_id)
+    if not game or game.get("state") != "TEAM_NAMING_A":
+        return
+    # Default team a name stays as "team a"
+    game["team_a"]["name"] = "team a"
+    game["state"] = "TEAM_NAMING_B"
+    context.job_queue.run_once(team_b_naming_timeout, 10, data={"chat_id": chat_id}, name=f"team_b_naming_{chat_id}")
+    await context.bot.send_message(
+        chat_id,
+        "⏳ Time's up for Team A! Proceeding with default name: <b>team a</b> 🔴\n\n"
+        "🔵 <b>TEAM B NAMING</b>\n\n"
+        "Give Team B a name in 10 seconds or it will be processed as <b>team b</b> by default! ⏳\n"
+        "<b>(Only the Game Host can set the name. Type the name you want!)</b>\n"
+        "Max 10 characters. If you type 'team beta', it will be set as 'beta'.",
+        parse_mode="HTML",
+    )
+
+
+async def team_b_naming_timeout(context: ContextTypes.DEFAULT_TYPE):
+    job     = context.job
+    chat_id = job.data["chat_id"]
+    game    = context.bot_data.get(chat_id)
+    if not game or game.get("state") != "TEAM_NAMING_B":
+        return
+    # Default team b name stays as "team b"
+    game["team_b"]["name"] = "team b"
+    game["state"] = "TEAM_JOINING"
+    
+    kb = [[
+        InlineKeyboardButton(f"Join {game['team_a']['name'].title()} 🔴", callback_data="join_team_a"),
+        InlineKeyboardButton(f"Join {game['team_b']['name'].title()} 🔵", callback_data="join_team_b"),
+    ]]
+    context.job_queue.run_once(team_join_timeout, 10, data={"chat_id": chat_id}, name=f"team_join_{chat_id}")
+    await context.bot.send_message(
+        chat_id,
+        f"⏳ Time's up for Team B! Proceeding with default name: <b>team b</b> 🔵\n\n"
+        f"⚔️ <b>TEAM REGISTRATION OPEN!</b> ⚔️\n\n"
+        f"Players, choose your sides! You have 10 seconds to join. ⏳\n"
+        f"<b>(Host can type /rejoin to extend 30s or use /add or /remove)</b>",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="HTML",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -2548,22 +2595,20 @@ async def create_team_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Only the Game Host can create the teams!")
         return
 
-    game["state"]                     = "TEAM_JOINING"
+    game["state"]                     = "TEAM_NAMING_A"
     game["is_paused_waiting_players"] = False
-    game["team_a"] = {"players": [], "captain": None, "score": 0, "wickets": 0, "balls_bowled": 0}
-    game["team_b"] = {"players": [], "captain": None, "score": 0, "wickets": 0, "balls_bowled": 0}
+    game["team_a"] = {"players": [], "captain": None, "score": 0, "wickets": 0, "balls_bowled": 0, "name": "team a"}
+    game["team_b"] = {"players": [], "captain": None, "score": 0, "wickets": 0, "balls_bowled": 0, "name": "team b"}
+    game["team_naming_context"] = {}
 
-    kb = [[
-        InlineKeyboardButton("Join Team A 🔴", callback_data="join_team_a"),
-        InlineKeyboardButton("Join Team B 🔵", callback_data="join_team_b"),
-    ]]
-    context.job_queue.run_once(team_join_timeout, 10, data={"chat_id": chat_id}, name=f"team_join_{chat_id}")
+    # Start team A naming timeout
+    context.job_queue.run_once(team_a_naming_timeout, 10, data={"chat_id": chat_id}, name=f"team_a_naming_{chat_id}")
     await update.message.reply_text(
-        "⚔️ <b>TEAM REGISTRATION OPEN!</b> ⚔️\n\n"
-        "Players, choose your sides! You have 10 seconds to join. ⏳\n"
-        "<b>(Host can type /rejoin to extend 30s or use /add or /remove)</b>",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="HTML",
+        "🔴 <b>TEAM A NAMING</b>\n\n"
+        "Give Team A a name in 10 seconds or it will be processed as <b>team a</b> by default! ⏳\n"
+        "<b>(Only the Game Host can set the name. Type the name you want!)</b>\n"
+        "Max 10 characters. If you type 'team alpha', it will be set as 'alpha'.",
+        parse_mode="HTML"
     )
 
 
@@ -2619,6 +2664,50 @@ async def rejoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job.schedule_removal()
     context.job_queue.run_once(team_join_timeout, 30, data={"chat_id": chat_id}, name=f"team_join_{chat_id}")
     await update.message.reply_text("⏳ <b>Registration Extended!</b> 30 more seconds to join the teams! 👥", parse_mode="HTML")
+
+
+async def name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if update.effective_chat.type == "private":
+        return
+    game = context.bot_data.get(chat_id)
+    if not game or game.get("mode") != "TEAM":
+        await update.message.reply_text("❌ No active team match right now!")
+        return
+    if update.effective_user.id != game.get("host_id"):
+        await update.message.reply_text("❌ Only the Game Host can change team names!")
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Usage: /name a newname OR /name b newname\nExample: /name a Titans")
+        return
+    
+    team_choice = context.args[0].lower()
+    if team_choice not in ["a", "b"]:
+        await update.message.reply_text("❌ Please specify team 'a' or 'b'. Example: /name a Titans")
+        return
+    
+    new_name = " ".join(context.args[1:]).strip().lower()
+    if new_name.startswith("team "):
+        new_name = new_name[5:].strip()
+    
+    if len(new_name) > 10:
+        await update.message.reply_text("❌ Team name is too long! Maximum 10 characters allowed.")
+        return
+    
+    if not new_name:
+        await update.message.reply_text("❌ Team name cannot be empty!")
+        return
+    
+    team_key = f"team_{team_choice}"
+    old_name = game[team_key].get("name", f"team {team_choice}")
+    game[team_key]["name"] = new_name
+    
+    await update.message.reply_text(
+        f"✅ Team {team_choice.upper()} name changed from <b>{old_name}</b> to <b>{new_name}</b>!",
+        parse_mode="HTML"
+    )
+    _invalidate_scoreboard_pfp_cache(chat_id)
+    asyncio.create_task(build_scoreboard_base_image(context, chat_id, game))
 
 
 async def changeover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3324,6 +3413,55 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="HTML",
     )
+
+
+async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /top — Show the best player by experience points with their profile picture
+    """
+    if users_col is None:
+        await update.message.reply_text("❌ Database not connected.")
+        return
+    
+    # Get the user with the highest exp points
+    top_user = await users_col.find_one({}, sort=[("exp", -1)])
+    
+    if not top_user:
+        await update.message.reply_text("❌ No players found in the database yet!")
+        return
+    
+    user_id = top_user.get("user_id")
+    username = top_user.get("username", "Unknown")
+    exp = top_user.get("exp", 0)
+    
+    try:
+        user = await context.bot.get_chat(user_id)
+        
+        # Get profile pictures
+        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
+        
+        caption = (
+            f"👑 <b>ELITE CRICKET BOT LEGEND</b> 👑\n\n"
+            f"<a href='tg://user?id={user_id}'><b>{username}</b></a> is the best player "
+            f"of Elite Cricket Bot till date! 🏆\n\n"
+            f"With incredible skills, strategic brilliance, and unwavering determination, "
+            f"this legend has conquered every battlefield on the cricket field. "
+            f"An inspiration to all players! 🌟"
+        )
+        
+        if photos.total_count > 0:
+            photo = photos.photos[0][-1]  # Get the highest quality photo
+            await update.message.reply_photo(
+                photo=photo.file_id,
+                caption=caption,
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(caption, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Error fetching top player details: {str(e)}"
+        )
 
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5353,6 +5491,64 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and await is_banned(update.effective_user.id):
         return
 
+    # ── Team Naming in Group Chats ───────────────────────────────────────────
+    if chat_type != "private":
+        chat_id = update.effective_chat.id
+        game = context.bot_data.get(chat_id)
+        if game and game.get("state") in ["TEAM_NAMING_A", "TEAM_NAMING_B"]:
+            # Only host can set team names
+            if update.effective_user.id != game.get("host_id"):
+                return
+            
+            if not user_input:
+                return
+            
+            # Process team name: strip "team " prefix if present, max 10 chars
+            team_name = user_input.lower()
+            if team_name.startswith("team "):
+                team_name = team_name[5:].strip()
+            
+            # Enforce max 10 character limit
+            if len(team_name) > 10:
+                await update.message.reply_text("❌ Team name is too long! Maximum 10 characters allowed.")
+                return
+            
+            # Cancel existing naming timeout and proceed
+            if game.get("state") == "TEAM_NAMING_A":
+                for job in context.job_queue.get_jobs_by_name(f"team_a_naming_{chat_id}"):
+                    job.schedule_removal()
+                game["team_a"]["name"] = team_name
+                game["state"] = "TEAM_NAMING_B"
+                context.job_queue.run_once(team_b_naming_timeout, 10, data={"chat_id": chat_id}, name=f"team_b_naming_{chat_id}")
+                await update.message.reply_text(
+                    f"✅ Team A named: <b>{team_name}</b> 🔴\n\n"
+                    f"🔵 <b>TEAM B NAMING</b>\n\n"
+                    f"Give Team B a name in 10 seconds or it will be processed as <b>team b</b> by default! ⏳\n"
+                    f"<b>(Only the Game Host can set the name. Type the name you want!)</b>\n"
+                    f"Max 10 characters.",
+                    parse_mode="HTML"
+                )
+            elif game.get("state") == "TEAM_NAMING_B":
+                for job in context.job_queue.get_jobs_by_name(f"team_b_naming_{chat_id}"):
+                    job.schedule_removal()
+                game["team_b"]["name"] = team_name
+                game["state"] = "TEAM_JOINING"
+                
+                kb = [[
+                    InlineKeyboardButton(f"Join {game['team_a']['name'].title()} 🔴", callback_data="join_team_a"),
+                    InlineKeyboardButton(f"Join {game['team_b']['name'].title()} 🔵", callback_data="join_team_b"),
+                ]]
+                context.job_queue.run_once(team_join_timeout, 10, data={"chat_id": chat_id}, name=f"team_join_{chat_id}")
+                await update.message.reply_text(
+                    f"✅ Team B named: <b>{team_name}</b> 🔵\n\n"
+                    f"⚔️ <b>TEAM REGISTRATION OPEN!</b> ⚔️\n\n"
+                    f"Players, choose your sides! You have 10 seconds to join. ⏳\n"
+                    f"<b>(Host can type /rejoin to extend 30s or use /add or /remove)</b>",
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode="HTML"
+                )
+            return
+
     # ── Private DM — Registration flow ────────────────────────────────────
     if chat_type == "private":
         reg_state = context.user_data.get("reg_state")
@@ -7251,9 +7447,11 @@ async def ownerhelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 <b>Stats &amp; Info</b>\n"
         "  /botstats — View bot-wide statistics\n"
         "  /botgroups — List all groups the bot is in\n"
-        "  /info [group_id] — View info on a specific group\n\n"
+        "  /info [group_id] — View info on a specific group\n"
+        "  /top — Show top ranked player by experience points\n\n"
         "🏏 <b>Match Controls</b>\n"
-        "  /penalty [Team] [Balls] [Runs] — Apply a penalty in a TEAM match\n\n"
+        "  /penalty [Team] [Balls] [Runs] — Apply a penalty in a TEAM match\n"
+        "  /name [a/b] [name] — Change team name (host-only, max 10 chars, TEAM match only)\n\n"
         "🔄 <b>Leaderboard</b>\n"
         "  /resetweekly — Reset weekly leaderboard stats to 0 for all players\n\n"
         "🔁 <b>Stats Transfer</b>\n"
@@ -7452,6 +7650,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("bowling",     bowling_command))
     app.add_handler(CommandHandler("userstats",   userstats_command))
     app.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    app.add_handler(CommandHandler("top",         top_command))
     app.add_handler(CommandHandler("broadcast",   broadcast_command))
     app.add_handler(CommandHandler("forward",     forward_command))
     app.add_handler(CommandHandler("permit",      permit_command))
@@ -7478,6 +7677,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("unbanuser",   unbanuser_command))
     app.add_handler(CommandHandler("banlist",     banlist_command))
     app.add_handler(CommandHandler("shift",       shift_command))
+    app.add_handler(CommandHandler("name",        name_command))
     app.add_handler(CommandHandler("resetweekly", resetweekly_command))
     app.add_handler(CommandHandler("transfer",    transfer_command))
     app.add_handler(CommandHandler("hosts",       hosts_command))
