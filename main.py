@@ -560,7 +560,7 @@ async def generate_userstats_image(
         val_cx   = int(iw * _US["val_cx_pct"])
         row_h    = int(ih * _US["row_h_pct"])
         # Target font size: 35% of row height → ~23 px on the 1536×1024 template
-        font_size = max(10, int(row_h * 0.35))
+        font_size = max(10, int(row_h * 0.354))
         font      = _load_userstats_font(font_size)
 
         hs_text  = f"{hs_runs} ({hs_balls}b)" if hs_balls > 0 else str(hs_runs)
@@ -2382,7 +2382,7 @@ async def trigger_team_captains(context, chat_id, game):
             pass
     kb = [[
         InlineKeyboardButton("Team A Captain 👑", callback_data="team_cap_a"),
-        InlineKeyboardButton("Team B Captain 👑", callback_data="team_cap_b"),
+        InlineKeyboardButton("Team B Captain ??", callback_data="team_cap_b"),
     ]]
     await context.bot.send_message(
         chat_id,
@@ -2422,53 +2422,6 @@ async def spamfree_timeout(context: ContextTypes.DEFAULT_TYPE):
         "⏳ Time is up! ⚠️ <b>SPAM IS ALLOWED.</b>\n\n"
         "Batting Captain/Host, please select your opening pair using:\n"
         "<code>/batting [number]</code> (do it twice).\nClick on /batting to view batters!!",
-        parse_mode="HTML",
-    )
-
-
-async def team_a_naming_timeout(context: ContextTypes.DEFAULT_TYPE):
-    job     = context.job
-    chat_id = job.data["chat_id"]
-    game    = context.bot_data.get(chat_id)
-    if not game or game.get("state") != "TEAM_NAMING_A":
-        return
-    # Default team a name stays as "team a"
-    game["team_a"]["name"] = "team a"
-    game["state"] = "TEAM_NAMING_B"
-    context.job_queue.run_once(team_b_naming_timeout, 10, data={"chat_id": chat_id}, name=f"team_b_naming_{chat_id}")
-    await context.bot.send_message(
-        chat_id,
-        "⏳ Time's up for Team A! Proceeding with default name: <b>team a</b> 🔴\n\n"
-        "🔵 <b>TEAM B NAMING</b>\n\n"
-        "Give Team B a name in 10 seconds or it will be processed as <b>team b</b> by default! ⏳\n"
-        "<b>(Only the Game Host can set the name. Type the name you want!)</b>\n"
-        "Max 10 characters. If you type 'team beta', it will be set as 'beta'.",
-        parse_mode="HTML",
-    )
-
-
-async def team_b_naming_timeout(context: ContextTypes.DEFAULT_TYPE):
-    job     = context.job
-    chat_id = job.data["chat_id"]
-    game    = context.bot_data.get(chat_id)
-    if not game or game.get("state") != "TEAM_NAMING_B":
-        return
-    # Default team b name stays as "team b"
-    game["team_b"]["name"] = "team b"
-    game["state"] = "TEAM_JOINING"
-    
-    kb = [[
-        InlineKeyboardButton(f"Join {game['team_a']['name'].title()} 🔴", callback_data="join_team_a"),
-        InlineKeyboardButton(f"Join {game['team_b']['name'].title()} 🔵", callback_data="join_team_b"),
-    ]]
-    context.job_queue.run_once(team_join_timeout, 10, data={"chat_id": chat_id}, name=f"team_join_{chat_id}")
-    await context.bot.send_message(
-        chat_id,
-        f"⏳ Time's up for Team B! Proceeding with default name: <b>team b</b> 🔵\n\n"
-        f"⚔️ <b>TEAM REGISTRATION OPEN!</b> ⚔️\n\n"
-        f"Players, choose your sides! You have 10 seconds to join. ⏳\n"
-        f"<b>(Host can type /rejoin to extend 30s or use /add or /remove)</b>",
-        reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="HTML",
     )
 
@@ -2534,8 +2487,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb_private = [
             [InlineKeyboardButton("ADD IN GROUP TO PLAY ➕", url=f"https://t.me/{bot_info.username}?startgroup=true")],
             [InlineKeyboardButton("STATS 📊", callback_data="dm_stats"), InlineKeyboardButton("RANKINGS 🏆", callback_data="dm_rankings")],
-            [InlineKeyboardButton("Support Group 💬", url="https://t.me/elitexplays")],
-            [InlineKeyboardButton("Contact Developer 👨‍💻", url="https://t.me/bexqm")],
+            [InlineKeyboardButton("Support Group 💬", url="https://t.me/elitexplayzone")],
+            [InlineKeyboardButton("Contact Developer 👨‍💻", url="https://t.me/wasclose")],
         ]
         await update.message.reply_photo(
             photo="https://res.cloudinary.com/dxgfxfoog/image/upload/v1777818831/file_00000000677c71fa8d7d9caa8a1b3cc9_k7l0au.png",
@@ -2595,20 +2548,22 @@ async def create_team_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Only the Game Host can create the teams!")
         return
 
-    game["state"]                     = "TEAM_NAMING_A"
+    game["state"]                     = "TEAM_JOINING"
     game["is_paused_waiting_players"] = False
-    game["team_a"] = {"players": [], "captain": None, "score": 0, "wickets": 0, "balls_bowled": 0, "name": "team a"}
-    game["team_b"] = {"players": [], "captain": None, "score": 0, "wickets": 0, "balls_bowled": 0, "name": "team b"}
-    game["team_naming_context"] = {}
+    game["team_a"] = {"players": [], "captain": None, "score": 0, "wickets": 0, "balls_bowled": 0}
+    game["team_b"] = {"players": [], "captain": None, "score": 0, "wickets": 0, "balls_bowled": 0}
 
-    # Start team A naming timeout
-    context.job_queue.run_once(team_a_naming_timeout, 10, data={"chat_id": chat_id}, name=f"team_a_naming_{chat_id}")
+    kb = [[
+        InlineKeyboardButton("Join Team A 🔴", callback_data="join_team_a"),
+        InlineKeyboardButton("Join Team B 🔵", callback_data="join_team_b"),
+    ]]
+    context.job_queue.run_once(team_join_timeout, 10, data={"chat_id": chat_id}, name=f"team_join_{chat_id}")
     await update.message.reply_text(
-        "🔴 <b>TEAM A NAMING</b>\n\n"
-        "Give Team A a name in 10 seconds or it will be processed as <b>team a</b> by default! ⏳\n"
-        "<b>(Only the Game Host can set the name. Type the name you want!)</b>\n"
-        "Max 10 characters. If you type 'team alpha', it will be set as 'alpha'.",
-        parse_mode="HTML"
+        "⚔️ <b>TEAM REGISTRATION OPEN!</b> ⚔️\n\n"
+        "Players, choose your sides! You have 10 seconds to join. ⏳\n"
+        "<b>(Host can type /rejoin to extend 30s or use /add or /remove)</b>",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="HTML",
     )
 
 
@@ -2664,50 +2619,6 @@ async def rejoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job.schedule_removal()
     context.job_queue.run_once(team_join_timeout, 30, data={"chat_id": chat_id}, name=f"team_join_{chat_id}")
     await update.message.reply_text("⏳ <b>Registration Extended!</b> 30 more seconds to join the teams! 👥", parse_mode="HTML")
-
-
-async def name_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if update.effective_chat.type == "private":
-        return
-    game = context.bot_data.get(chat_id)
-    if not game or game.get("mode") != "TEAM":
-        await update.message.reply_text("❌ No active team match right now!")
-        return
-    if update.effective_user.id != game.get("host_id"):
-        await update.message.reply_text("❌ Only the Game Host can change team names!")
-        return
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("Usage: /name a newname OR /name b newname\nExample: /name a Titans")
-        return
-    
-    team_choice = context.args[0].lower()
-    if team_choice not in ["a", "b"]:
-        await update.message.reply_text("❌ Please specify team 'a' or 'b'. Example: /name a Titans")
-        return
-    
-    new_name = " ".join(context.args[1:]).strip().lower()
-    if new_name.startswith("team "):
-        new_name = new_name[5:].strip()
-    
-    if len(new_name) > 10:
-        await update.message.reply_text("❌ Team name is too long! Maximum 10 characters allowed.")
-        return
-    
-    if not new_name:
-        await update.message.reply_text("❌ Team name cannot be empty!")
-        return
-    
-    team_key = f"team_{team_choice}"
-    old_name = game[team_key].get("name", f"team {team_choice}")
-    game[team_key]["name"] = new_name
-    
-    await update.message.reply_text(
-        f"✅ Team {team_choice.upper()} name changed from <b>{old_name}</b> to <b>{new_name}</b>!",
-        parse_mode="HTML"
-    )
-    _invalidate_scoreboard_pfp_cache(chat_id)
-    asyncio.create_task(build_scoreboard_base_image(context, chat_id, game))
 
 
 async def changeover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2938,9 +2849,20 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
                 target_name = p["name"]
+                was_out = p.get("is_out", False)
                 game[team_key]["players"].remove(p)
                 for i, pr in enumerate(game[team_key]["players"], 1):
                     pr["num"] = i
+                # If the removed player was already out AND belonged to the
+                # currently batting team, roll back their wicket so the
+                # all-out counter doesn't prematurely end the innings.
+                if (
+                    was_out
+                    and game.get("state") == "PLAYING"
+                    and game.get("batting_team_ref") is game.get(team_key)
+                    and game["batting_team_ref"].get("wickets", 0) > 0
+                ):
+                    game["batting_team_ref"]["wickets"] -= 1
                 removed = True
                 break
 
@@ -3360,18 +3282,19 @@ async def userstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else f"⭐ <b>EXP:</b> {exp} | 🏆 <b>MAX LEVEL REACHED!</b>\n"
         )
 
-        stats_text  = f"🚀 <b>{level} STATISTICS</b> \n═══════════════\n"
+        stats_text  = f"🚀\n <b>{level} STATISTICS</b> \n━━━━━━━━━━━━━━━━━━\n"
         stats_text += f"👤 <b>Name:</b> {user_data.get('first_name', 'Unknown')}\n🆔 <b>ID:</b> <code>{user_data.get('user_id', 'Unknown')}</code>\n{exp_line}ㅤㅤ\n"
         stats_text += f"🏏 <b>BATTING STATS</b>\n🌀 <b>Highest Score:</b> {hs_runs} ({hs_balls})\n👀 <b>Total Runs:</b> {total_runs}\n🎀 <b>Batting Avg:</b> {avg:.2f}\n⚡ <b>Strike Rate:</b> {sr:.2f}\n"
         stats_text += f"💥 <b>6s:</b> {user_data.get('total_6s', 0)} | <b>4s:</b> {user_data.get('total_4s', 0)}\n🕸️ <b>100s:</b> {user_data.get('centuries', 0)} | <b>50s:</b> {user_data.get('half_centuries', 0)}\n"
         stats_text += f"🔸 <b>Ducks 🦆:</b> {user_data.get('ducks', 0)}\nㅤ\n"
         stats_text += f"🥎 <b>BOWLING STATS</b>\n👾 <b>Wickets:</b> {user_data.get('wickets', 0)}\n🌪️ <b>Hat-Tricks:</b> {user_data.get('hat_tricks', 0)}\n🧤 <b>Catches:</b> {user_data.get('catches', 0)}\n"
         stats_text += f"🍁 <b>Overs Bowled:</b> {overs}.{rem_balls}\n💐 <b>Economy:</b> {eco:.2f}\nㅤ\n"
-        stats_text += f"🏆 <b>MATCH &amp; AWARDS</b>\n⛄ <b>Solo Matches:</b> {user_data.get('solo_matches', 0)}\n☃️ <b>Team Matches:</b> {user_data.get('team_matches', 0)}\n"
+        stats_text += f"🏆 <b>\nMATCH &amp; AWARDS</b>\n⛄ <b>Solo Matches:</b> {user_data.get('solo_matches', 0)}\n☃️ <b>Team Matches:</b> {user_data.get('team_matches', 0)}\n"
         stats_text += f"🎉 <b>MOTM Awards:</b> {user_data.get('motm', 0)}\nㅤ\n #elite_bots"
 
         # Try to generate the custom userstats card image
-        target_uid = target_user.id if target_user else None
+        # Fall back to DB user_id when target_user is None (username-only lookup)
+        target_uid = target_user.id if target_user else user_data.get("user_id")
         card_bytes = None
         if target_uid and PIL_AVAILABLE:
             card_bytes = await generate_userstats_image(
@@ -3413,55 +3336,6 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="HTML",
     )
-
-
-async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /top — Show the best player by experience points with their profile picture
-    """
-    if users_col is None:
-        await update.message.reply_text("❌ Database not connected.")
-        return
-    
-    # Get the user with the highest exp points
-    top_user = await users_col.find_one({}, sort=[("exp", -1)])
-    
-    if not top_user:
-        await update.message.reply_text("❌ No players found in the database yet!")
-        return
-    
-    user_id = top_user.get("user_id")
-    username = top_user.get("username", "Unknown")
-    exp = top_user.get("exp", 0)
-    
-    try:
-        user = await context.bot.get_chat(user_id)
-        
-        # Get profile pictures
-        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
-        
-        caption = (
-            f"👑 <b>ELITE CRICKET BOT LEGEND</b> 👑\n\n"
-            f"<a href='tg://user?id={user_id}'><b>{username}</b></a> is the best player "
-            f"of Elite Cricket Bot till date! 🏆\n\n"
-            f"With incredible skills, strategic brilliance, and unwavering determination, "
-            f"this legend has conquered every battlefield on the cricket field. "
-            f"An inspiration to all players! 🌟"
-        )
-        
-        if photos.total_count > 0:
-            photo = photos.photos[0][-1]  # Get the highest quality photo
-            await update.message.reply_photo(
-                photo=photo.file_id,
-                caption=caption,
-                parse_mode="HTML"
-            )
-        else:
-            await update.message.reply_text(caption, parse_mode="HTML")
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ Error fetching top player details: {str(e)}"
-        )
 
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4760,7 +4634,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             hit_opts = "1-6" if game.get("mode") == "SOLO" else "0-6"
             await send_media_safely(
                 context, group_id, MEDIA["batter_turn"],
-                f"🚨 Ball bowled! 🥎💨\n👇 <a href='tg://user?id={batter['id']}'>{batter['name']}</a>, type {hit_opts} to hit!🏏",
+                f"🚨 Ball delivered!! 🥎💨\n👇 <a href='tg://user?id={batter['id']}'>{batter['name']}</a>, type {hit_opts} to hit!🏏",
             )
             set_afk_timer(context, group_id, batter["id"], "BATTER")
 
@@ -5490,64 +5364,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Ban check — blocked users cannot participate ───────────────────────
     if update.effective_user and await is_banned(update.effective_user.id):
         return
-
-    # ── Team Naming in Group Chats ───────────────────────────────────────────
-    if chat_type != "private":
-        chat_id = update.effective_chat.id
-        game = context.bot_data.get(chat_id)
-        if game and game.get("state") in ["TEAM_NAMING_A", "TEAM_NAMING_B"]:
-            # Only host can set team names
-            if update.effective_user.id != game.get("host_id"):
-                return
-            
-            if not user_input:
-                return
-            
-            # Process team name: strip "team " prefix if present, max 10 chars
-            team_name = user_input.lower()
-            if team_name.startswith("team "):
-                team_name = team_name[5:].strip()
-            
-            # Enforce max 10 character limit
-            if len(team_name) > 10:
-                await update.message.reply_text("❌ Team name is too long! Maximum 10 characters allowed.")
-                return
-            
-            # Cancel existing naming timeout and proceed
-            if game.get("state") == "TEAM_NAMING_A":
-                for job in context.job_queue.get_jobs_by_name(f"team_a_naming_{chat_id}"):
-                    job.schedule_removal()
-                game["team_a"]["name"] = team_name
-                game["state"] = "TEAM_NAMING_B"
-                context.job_queue.run_once(team_b_naming_timeout, 10, data={"chat_id": chat_id}, name=f"team_b_naming_{chat_id}")
-                await update.message.reply_text(
-                    f"✅ Team A named: <b>{team_name}</b> 🔴\n\n"
-                    f"🔵 <b>TEAM B NAMING</b>\n\n"
-                    f"Give Team B a name in 10 seconds or it will be processed as <b>team b</b> by default! ⏳\n"
-                    f"<b>(Only the Game Host can set the name. Type the name you want!)</b>\n"
-                    f"Max 10 characters.",
-                    parse_mode="HTML"
-                )
-            elif game.get("state") == "TEAM_NAMING_B":
-                for job in context.job_queue.get_jobs_by_name(f"team_b_naming_{chat_id}"):
-                    job.schedule_removal()
-                game["team_b"]["name"] = team_name
-                game["state"] = "TEAM_JOINING"
-                
-                kb = [[
-                    InlineKeyboardButton(f"Join {game['team_a']['name'].title()} 🔴", callback_data="join_team_a"),
-                    InlineKeyboardButton(f"Join {game['team_b']['name'].title()} 🔵", callback_data="join_team_b"),
-                ]]
-                context.job_queue.run_once(team_join_timeout, 10, data={"chat_id": chat_id}, name=f"team_join_{chat_id}")
-                await update.message.reply_text(
-                    f"✅ Team B named: <b>{team_name}</b> 🔵\n\n"
-                    f"⚔️ <b>TEAM REGISTRATION OPEN!</b> ⚔️\n\n"
-                    f"Players, choose your sides! You have 10 seconds to join. ⏳\n"
-                    f"<b>(Host can type /rejoin to extend 30s or use /add or /remove)</b>",
-                    reply_markup=InlineKeyboardMarkup(kb),
-                    parse_mode="HTML"
-                )
-            return
 
     # ── Private DM — Registration flow ────────────────────────────────────
     if chat_type == "private":
@@ -6599,7 +6415,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if game.get("state") == "PLAYING" and game.get("waiting_for") == "BOWLER":
         await maybe_send_chase_message(context, chat_id, game)
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.2)
         try:
             await trigger_bowl(context, chat_id)
         except Exception:
@@ -7447,11 +7263,9 @@ async def ownerhelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 <b>Stats &amp; Info</b>\n"
         "  /botstats — View bot-wide statistics\n"
         "  /botgroups — List all groups the bot is in\n"
-        "  /info [group_id] — View info on a specific group\n"
-        "  /top — Show top ranked player by experience points\n\n"
+        "  /info [group_id] — View info on a specific group\n\n"
         "🏏 <b>Match Controls</b>\n"
-        "  /penalty [Team] [Balls] [Runs] — Apply a penalty in a TEAM match\n"
-        "  /name [a/b] [name] — Change team name (host-only, max 10 chars, TEAM match only)\n\n"
+        "  /penalty [Team] [Balls] [Runs] — Apply a penalty in a TEAM match\n\n"
         "🔄 <b>Leaderboard</b>\n"
         "  /resetweekly — Reset weekly leaderboard stats to 0 for all players\n\n"
         "🔁 <b>Stats Transfer</b>\n"
@@ -7600,6 +7414,256 @@ async def shift_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# /sledge command
+# ---------------------------------------------------------------------------
+
+_SLEDGE_LINES = [
+    "Bhai tera bat hai ya jhadu? Aise swing ho raha hai! 🧹",
+    "Tu cricket khelne aaya hai ya crowd ki ginti badhane? 🎟️",
+    "Teri bowling dekh ke ball khud ro raha tha! 😭",
+    "Tera highest score meri age se kam hai bhai 💀",
+    "Tu pitch pe aaya aur opposition ne celebration shuru kar di 🥂",
+    "Itna practice kiya aur fir bhi yahi haal? Wapas nets pe ja! 🏃",
+    "Teri fielding dekh ke lagta hai tu slow motion mein chal raha hai 🐢",
+    "Ball tujhse zyada tez sochti hai bhai 🧠",
+    "Tu bowler hai ya juggler? Har ball alag direction mein jaati hai 🤹",
+    "Tera career graph dekha? Seedha neeche — elevator bhi itna fast nahi jaata 📉",
+    "Bhai tu clown hai 🤡🤡 trying to be smart, ye dekh out hone wala 🤡",
+    "Tu out hoga toh opposition party karega aur tere apne relief lenge 😂",
+    "Tune bat se shot maara ya mosquito udaaya? Same result 🦟",
+    "Tujhe dekhke umpire bhi pehle se OUTTTT bolne ki practice karne laga 🏏",
+    "Teri run rate dekh ke lagta hai tu reverse gear mein hai 🚗",
+    "Bhai itna sasta wicket toh free mein bhi koi nahi leta 🎁",
+    "Tu bowling karega toh batsman ko warm-up dene jaata hai bas 🥱",
+    "Tere catch pakadne ka style dekha? Ball ground pe pahunchi aur tu hawa mein 🫧",
+    "Tera bat straight nahi, life bhi straight nahi — dono mein same problem 😬",
+    "Championship nahi jeeta tu kabhi, but participation certificate zaroor milega 🏅",
+    "Teri economy rate dekhi? MCD aur tu dono barabar waste phailate ho 🗑️",
+    "Bhai tujhe pitch pe jaane se pehle apni kismat pe pity aani chahiye 😔",
+    "Tu striker hai ya scarecrow? Ball seedha paar ho jaati hai 🌾",
+    "Opposition bowler ne tujhe dekha aur hat-trick ki planning start kar li 🎩",
+    "Tune jo shot khela woh shot nahi tha, woh ek cry for help tha 😢",
+    "Bhai tu cricketer nahi, statistician ka nightmare hai 📊",
+    "Itna run kiya tune life mein? Gym mein nahi — pitch se bhaag ke 🏃💨",
+    "Teri batting average meri electricity bill se bhi kam hai 💡",
+    "Tu bat pakad ke khada hota hai jaise pehli baar dekha ho 👀",
+    "Tera technique dekh ke coaches ne coaching chodd di 🎓",
+    "Ball tere bat ko dekhke rasta badal leti hai — self-respect hai usmein 🔄",
+    "Bhai tujhe cricket nahi, chess khelna chahiye — wahan movement nahi hoti ♟️",
+    "Tu pitch pe aaya — ek wicket confirmed ho gayi dono team ko pata hai 📋",
+    "Tera strike rate dekha? Tortoise bhi complain kare ki yaar itna slow mat ho 🐢",
+    "Tu 0 pe out hua aur crowd ne sukoon ki saans li 😮‍💨",
+    "Bhai teri bowling straight nahi jaati toh kya, life bhi toh curve hai 🌀",
+    "Tu fielding mein itna slow hai ki replay mein bhi late lagta hai ⏪",
+    "Tere dismissal video ko motivational fail compilations mein daala gaya hai 🎬",
+    "Duck maarne mein bhi tune record tod diya — kuch toh speciality hai 🦆",
+    "Bhai itni mehnat ke baad bhi yahi result? Kismet ne bhi diya up 🤷",
+    "Teri presence pitch pe hai ya pitch ka illusion hai? Doubt hai 🌫️",
+    "Ball tujhse seedha guzar gayi — social distancing maintain ki usne 😷",
+    "Tune jo over diya woh over nahi tha, woh ek gift hamper tha batting team ko 🎁",
+    "Tera bat heavy hai ya arms? Dono mein se koi toh kaam karo 💪",
+    "Bhai opposition ko tujhse nahi, tere shot selection se darr lagta hai 😱",
+    "Tera record dekha? Umpteen chances, zero results — startup culture 📈",
+    "Tu wicket pe aaya 5 seconds mein gaya — cameo bhi nahi bola ja sakta 🎭",
+    "Teri bowling mein variety hai — wide, no ball, full toss, sab kuch except wicket 🎪",
+    "Bhai tune batting ki ya fielding team ke liye warm-up karaya? Pata nahi chala 🤔",
+    "Tere baad aane wale batter ne pad pehen ke aane se pehle hi celebration ki 🎉",
+    "Tu gaya aur scoreboard ne sigh kiya 😮‍💨 — machine bhi feel karti hai yaar",
+    "Tera form itna kharab hai ki coach ne tujhe 12th man bhi rakhna band kar diya 🪑",
+    "Bhai teri fielding video ko anti-motivation ke liye use karte hain coaches 📹",
+    "Tu pitch pe aaya — aur umpire ne already out ka haath upar uthana practice kiya 🖐️",
+]
+
+async def sledge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("❌ /sledge can only be used in a group during a match!")
+        return
+
+    chat_id   = update.effective_chat.id
+    sledger   = update.effective_user
+    game      = context.bot_data.get(chat_id)
+
+    if not game or game.get("state") not in ("PLAYING",) or game.get("mode") not in ("TEAM", "SOLO"):
+        await update.message.reply_text("❌ No active match right now — save the sledge for the pitch! 🏏")
+        return
+
+    target_user, target_username = get_user_from_mention(update)
+
+    # Resolve username via DB if needed
+    if not target_user and target_username and users_col is not None:
+        db_rec = await users_col.find_one({"username": target_username})
+        if db_rec:
+            class _U:
+                def __init__(self, uid, fname, uname):
+                    self.id = uid; self.first_name = fname; self.username = uname
+            target_user = _U(db_rec["user_id"], db_rec.get("first_name","?"), target_username)
+
+    if not target_user:
+        await update.message.reply_text("❌ Tag or reply to a player to sledge them!")
+        return
+
+    # Build set of valid sledge targets (striker, non-striker, current bowler)
+    striker     = game.get("striker") or {}
+    non_striker = game.get("non_striker") or {}
+    bowler      = game.get("current_bowler") or {}
+    valid_ids   = {
+        striker.get("id"),
+        non_striker.get("id"),
+        bowler.get("id"),
+    } - {None}
+
+    if target_user.id not in valid_ids:
+        await update.message.reply_text(
+            "❌ You can only sledge the current batters or the bowler on the pitch! 🎯",
+        )
+        return
+
+    if target_user.id == sledger.id:
+        await update.message.reply_text("🤡 Bhai khud ko sledge kar raha hai? Self-awareness ka naya level!")
+        return
+
+    line = random.choice(_SLEDGE_LINES)
+    sledger_link = f"<a href='tg://user?id={sledger.id}'>{sledger.first_name}</a>"
+    target_link  = f"<a href='tg://user?id={target_user.id}'>{target_user.first_name}</a>"
+    await update.message.reply_text(
+        f"🏏 {sledger_link} <b>edged</b> {target_link} by saying:\n\n"
+        f"❝ {line} ❞",
+        parse_mode="HTML",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /compare command
+# ---------------------------------------------------------------------------
+
+async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg    = update.effective_message
+    me     = update.effective_user
+    if not me or not msg:
+        return
+    if users_col is None:
+        await msg.reply_text("❌ Database connection error.")
+        return
+
+    target_user, target_username = get_user_from_mention(update)
+
+    # Resolve username via DB if needed
+    if not target_user and target_username:
+        db_rec = await users_col.find_one({"username": target_username})
+        if db_rec:
+            class _U2:
+                def __init__(self, uid, fname, uname):
+                    self.id = uid; self.first_name = fname; self.username = uname
+            target_user = _U2(db_rec["user_id"], db_rec.get("first_name", "?"), target_username)
+
+    if not target_user:
+        await msg.reply_text("❌ Tag or reply to the player you want to compare with!")
+        return
+
+    if target_user.id == me.id:
+        await msg.reply_text("🤡 Comparing yourself with yourself? Bold move.")
+        return
+
+    data_a = await users_col.find_one({"user_id": me.id})
+    data_b = await users_col.find_one({"user_id": target_user.id})
+
+    if not data_a:
+        await msg.reply_text("❌ You haven't played any matches yet!")
+        return
+    if not data_b:
+        await msg.reply_text(f"❌ {target_user.first_name} hasn't played any matches yet!")
+        return
+
+    def _safe(d, key, default=0):
+        return d.get(key, default) or default
+
+    def _eco(d):
+        bb = _safe(d, "balls_bowled")
+        rc = _safe(d, "runs_conceded")
+        return round(rc / bb * 6, 2) if bb > 0 else 0.0
+
+    def _avg(d):
+        tr   = _safe(d, "total_runs")
+        tm   = _safe(d, "team_matches") + _safe(d, "solo_matches")
+        dk   = _safe(d, "ducks")
+        outs = max(1, tm - dk)
+        return round(tr / outs, 2) if tr > 0 else 0.0
+
+    def _sr(d):
+        tr = _safe(d, "total_runs")
+        bf = _safe(d, "balls_faced")
+        return round(tr / bf * 100, 2) if bf > 0 else 0.0
+
+    name_a = data_a.get("first_name", me.first_name)
+    name_b = data_b.get("first_name", target_user.first_name)
+
+    stats = [
+        ("🏃 Total Runs",       _safe(data_a,"total_runs"),                  _safe(data_b,"total_runs"),                  True),
+        ("🌀 Highest Score",    _safe(data_a,"highest_score",{}).get("runs",0), _safe(data_b,"highest_score",{}).get("runs",0), True),
+        ("📊 Batting Avg",      _avg(data_a),                                 _avg(data_b),                                True),
+        ("⚡ Strike Rate",      _sr(data_a),                                  _sr(data_b),                                 True),
+        ("💥 Sixes",            _safe(data_a,"total_6s"),                     _safe(data_b,"total_6s"),                    True),
+        ("🔥 Fours",            _safe(data_a,"total_4s"),                     _safe(data_b,"total_4s"),                    True),
+        ("🏅 Centuries",        _safe(data_a,"centuries"),                    _safe(data_b,"centuries"),                   True),
+        ("🌟 Half-Centuries",   _safe(data_a,"half_centuries"),               _safe(data_b,"half_centuries"),              True),
+        ("🦆 Ducks",            _safe(data_a,"ducks"),                        _safe(data_b,"ducks"),                       False),
+        ("👾 Wickets",          _safe(data_a,"wickets"),                      _safe(data_b,"wickets"),                     True),
+        ("🎩 Hat-Tricks",       _safe(data_a,"hat_tricks"),                   _safe(data_b,"hat_tricks"),                  True),
+        ("🌪️ Economy Rate",    _eco(data_a),                                  _eco(data_b),                                False),
+        ("🧤 Catches",          _safe(data_a,"catches"),                      _safe(data_b,"catches"),                     True),
+        ("🏆 MOTM Awards",      _safe(data_a,"motm"),                         _safe(data_b,"motm"),                        True),
+        ("⛄ Solo Matches",     _safe(data_a,"solo_matches"),                 _safe(data_b,"solo_matches"),                True),
+        ("☃️ Team Matches",    _safe(data_a,"team_matches"),                 _safe(data_b,"team_matches"),                True),
+    ]
+
+    # Tally wins
+    wins_a = wins_b = draws = 0
+    rows = []
+    for label, va, vb, higher_is_better in stats:
+        diff = round(abs(va - vb), 2)
+        if va == vb:
+            icon_a = icon_b = "🤝"
+            diff_str = "equal"
+            draws += 1
+        elif (va > vb) == higher_is_better:
+            icon_a = "🌸"; icon_b = "🍌"
+            diff_str = f"+{diff} {name_a}"
+            wins_a += 1
+        else:
+            icon_a = "🍌"; icon_b = "🌸"
+            diff_str = f"+{diff} {name_b}"
+            wins_b += 1
+        rows.append(
+            f"  {icon_a} <b>{label}</b> {icon_b}\n"
+            f"   ┣ {name_a}: <b>{va}</b>\n"
+            f"   ┣ {name_b}: <b>{vb}</b>\n"
+            f"   ┗ 📌 <i>Lead: {diff_str}</i>"
+        )
+
+    # Overall verdict
+    if wins_a > wins_b:
+        verdict = f"🏆 <b>{name_a}</b> wins the comparison! ({wins_a}-{wins_b})"
+    elif wins_b > wins_a:
+        verdict = f"🏆 <b>{name_b}</b> wins the comparison! ({wins_b}-{wins_a})"
+    else:
+        verdict = f"🤝 It's a dead heat! ({wins_a}-{wins_b})"
+
+    header = (
+        f"⚔️ <b>HEAD-TO-HEAD COMPARISON</b> ⚔️\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌸 <b>{name_a}</b>  vs  <b>{name_b}</b> 🍌\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    body   = "\n\n".join(rows)
+    footer = (
+        f"\n\n━━━━━━━━━━━━━━━━━━━━\n"
+        f"{verdict}\n"
+        f"🌸 wins: {wins_a}  |  🍌 wins: {wins_b}  |  🤝 ties: {draws}"
+    )
+    await msg.reply_text(header + body + footer, parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
 # Registration photo input handler
 # ---------------------------------------------------------------------------
 
@@ -7650,7 +7714,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("bowling",     bowling_command))
     app.add_handler(CommandHandler("userstats",   userstats_command))
     app.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    app.add_handler(CommandHandler("top",         top_command))
     app.add_handler(CommandHandler("broadcast",   broadcast_command))
     app.add_handler(CommandHandler("forward",     forward_command))
     app.add_handler(CommandHandler("permit",      permit_command))
@@ -7677,11 +7740,12 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("unbanuser",   unbanuser_command))
     app.add_handler(CommandHandler("banlist",     banlist_command))
     app.add_handler(CommandHandler("shift",       shift_command))
-    app.add_handler(CommandHandler("name",        name_command))
     app.add_handler(CommandHandler("resetweekly", resetweekly_command))
     app.add_handler(CommandHandler("transfer",    transfer_command))
     app.add_handler(CommandHandler("hosts",       hosts_command))
     app.add_handler(CommandHandler("ownerhelp",   ownerhelp_command))
+    app.add_handler(CommandHandler("sledge",      sledge_command))
+    app.add_handler(CommandHandler("compare",     compare_command))
 
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo_input))
