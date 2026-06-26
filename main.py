@@ -7626,11 +7626,11 @@ async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             diff_str = "equal"
             draws += 1
         elif (va > vb) == higher_is_better:
-            icon_a = "🌸"; icon_b = "🍌"
+            icon_a = "🌸"; icon_b = "🌸"
             diff_str = f"+{diff} {name_a}"
             wins_a += 1
         else:
-            icon_a = "🍌"; icon_b = "🌸"
+            icon_a = "🌸"; icon_b = "🌸"
             diff_str = f"+{diff} {name_b}"
             wins_b += 1
         rows.append(
@@ -7651,14 +7651,14 @@ async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     header = (
         f"⚔️ <b>HEAD-TO-HEAD COMPARISON</b> ⚔️\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🌸 <b>{name_a}</b>  vs  <b>{name_b}</b> 🍌\n"
+        f"🌸 <b>{name_a}</b>  vs  <b>{name_b}</b> 🌸\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
     )
     body   = "\n\n".join(rows)
     footer = (
         f"\n\n━━━━━━━━━━━━━━━━━━━━\n"
         f"{verdict}\n"
-        f"🌸 wins: {wins_a}  |  🍌 wins: {wins_b}  |  🤝 ties: {draws}"
+        f"\n#elitebots "
     )
     await msg.reply_text(header + body + footer, parse_mode="HTML")
 
