@@ -96,6 +96,7 @@ try:
     banned_users_col    = db["banned_users"]
     match_history_col   = db["match_history"]
     permitted_hosts_col = db["permitted_hosts"]
+    celebrations_col    = db["celebrations"]
 except Exception as e:
     print(f"MongoDB Connection Error: {e}")
     users_col           = None
@@ -106,6 +107,7 @@ except Exception as e:
     banned_users_col    = None
     match_history_col   = None
     permitted_hosts_col = None
+    celebrations_col    = None
 
 # ---------------------------------------------------------------------------
 # Media URLs
@@ -1680,6 +1682,33 @@ def generate_team_scorecard(game):
 
             text += "\n"
 
+    # ── Show removed players (still tracked on scoreboard) ────────────────
+    removed_entries = game.get("removed_scoreboard", [])
+    if removed_entries:
+        # Group by original team
+        for team_key, emoji in [("team_a", "🔴"), ("team_b", "🔵")]:
+            team_removed = [e for e in removed_entries if e.get("_orig_team") == team_key]
+            if not team_removed:
+                continue
+            text += f"\n{emoji} <i>Removed players (stats retained)</i>\n"
+            for p in team_removed:
+                runs        = p.get("runs", 0)
+                balls_faced = p.get("balls_faced", 0)
+                sr          = runs / balls_faced * 100 if balls_faced > 0 else 0
+                balls_bowled = p.get("balls_bowled", 0)
+                conceded     = p.get("conceded", 0)
+                wkts         = p.get("wickets", 0)
+                ov, rem2     = divmod(balls_bowled, 6)
+                eco          = (conceded / balls_bowled) * 6 if balls_bowled else 0
+                rebat_tag    = " (rebat)" if p.get("_rebat") else ""
+                text += (
+                    f"👤 <b>{p['name']}</b> ❌{rebat_tag}\n"
+                    f"├ 🏏 {runs}({balls_faced}) | SR {sr:.0f}\n"
+                )
+                if balls_bowled > 0:
+                    text += f"└ 🥎 {wkts}W | {conceded}R | {ov}.{rem2}ov | Eco {eco:.1f}\n"
+                text += "\n"
+
     text += "\n#elite_bots"
 
     return text
@@ -2721,11 +2750,42 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         username = target_user.username.lower() if target_user.username else None
         await init_user_db(target_user.id, target_user.first_name, username)
-        new_player = {
-            "id": target_user.id, "name": target_user.first_name, "username": username,
-            "runs": 0, "balls_faced": 0, "wickets": 0, "conceded": 0,
-            "balls_bowled": 0, "is_out": False, "match_4s": 0, "match_6s": 0,
-        }
+
+        # ── Re-add logic: check if player was previously removed ────────────
+        _removed_entries = game.get("removed_scoreboard", [])
+        _prev_snap = next((e for e in _removed_entries if e["id"] == target_user.id), None)
+        if _prev_snap:
+            if _prev_snap.get("_orig_team") == team_key:
+                # Same team — re-joining as "rebat"; aggregate bowling stats
+                new_player = {
+                    "id": target_user.id, "name": target_user.first_name, "username": username,
+                    "runs": 0, "balls_faced": 0,
+                    "wickets": _prev_snap.get("wickets", 0),
+                    "conceded": _prev_snap.get("conceded", 0),
+                    "balls_bowled": _prev_snap.get("balls_bowled", 0),
+                    "is_out": False, "match_4s": 0, "match_6s": 0,
+                    "_rebat": True,
+                }
+                # Mark the scoreboard snapshot so it shows "(rebat)"
+                _prev_snap["_rebat"] = True
+            else:
+                # Different team — fresh batting record; bowling still aggregates to name
+                new_player = {
+                    "id": target_user.id, "name": target_user.first_name, "username": username,
+                    "runs": 0, "balls_faced": 0,
+                    "wickets": _prev_snap.get("wickets", 0),
+                    "conceded": _prev_snap.get("conceded", 0),
+                    "balls_bowled": _prev_snap.get("balls_bowled", 0),
+                    "is_out": False, "match_4s": 0, "match_6s": 0,
+                    "_cross_team": True,
+                }
+        else:
+            new_player = {
+                "id": target_user.id, "name": target_user.first_name, "username": username,
+                "runs": 0, "balls_faced": 0, "wickets": 0, "conceded": 0,
+                "balls_bowled": 0, "is_out": False, "match_4s": 0, "match_6s": 0,
+            }
+
         if game.get("state") != "TEAM_JOINING":
             new_player["num"] = get_next_num(game[team_key]["players"])
         game[team_key]["players"].append(new_player)
@@ -2789,11 +2849,35 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         resolved_username = target_user.username.lower() if target_user.username else None
         await init_user_db(target_user.id, target_user.first_name, resolved_username)
-        new_player = {
-            "id": target_user.id, "name": target_user.first_name, "username": resolved_username,
-            "runs": 0, "balls_faced": 0, "wickets": 0, "conceded": 0,
-            "balls_bowled": 0, "is_out": False, "match_4s": 0, "match_6s": 0,
-        }
+        # ── Re-add logic (multi-mention path): check removed snapshot ────────
+        _removed_entries_m = game.get("removed_scoreboard", [])
+        _prev_snap_m = next((e for e in _removed_entries_m if e["id"] == target_user.id), None)
+        if _prev_snap_m:
+            if _prev_snap_m.get("_orig_team") == team_key:
+                new_player = {
+                    "id": target_user.id, "name": target_user.first_name, "username": resolved_username,
+                    "runs": 0, "balls_faced": 0,
+                    "wickets": _prev_snap_m.get("wickets", 0),
+                    "conceded": _prev_snap_m.get("conceded", 0),
+                    "balls_bowled": _prev_snap_m.get("balls_bowled", 0),
+                    "is_out": False, "match_4s": 0, "match_6s": 0, "_rebat": True,
+                }
+                _prev_snap_m["_rebat"] = True
+            else:
+                new_player = {
+                    "id": target_user.id, "name": target_user.first_name, "username": resolved_username,
+                    "runs": 0, "balls_faced": 0,
+                    "wickets": _prev_snap_m.get("wickets", 0),
+                    "conceded": _prev_snap_m.get("conceded", 0),
+                    "balls_bowled": _prev_snap_m.get("balls_bowled", 0),
+                    "is_out": False, "match_4s": 0, "match_6s": 0, "_cross_team": True,
+                }
+        else:
+            new_player = {
+                "id": target_user.id, "name": target_user.first_name, "username": resolved_username,
+                "runs": 0, "balls_faced": 0, "wickets": 0, "conceded": 0,
+                "balls_bowled": 0, "is_out": False, "match_4s": 0, "match_6s": 0,
+            }
         if game.get("state") != "TEAM_JOINING":
             new_player["num"] = get_next_num(game[team_key]["players"])
         game[team_key]["players"].append(new_player)
@@ -2850,6 +2934,13 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
                 target_name = p["name"]
                 was_out = p.get("is_out", False)
+                # ── Scoreboard retention: keep a snapshot so the scorecard
+                # still shows this player even after removal. ──────────────
+                _snap = {k: v for k, v in p.items()}
+                _snap["_removed"]   = True
+                _snap["_orig_team"] = team_key
+                game.setdefault("removed_scoreboard", []).append(_snap)
+
                 game[team_key]["players"].remove(p)
                 for i, pr in enumerate(game[team_key]["players"], 1):
                     pr["num"] = i
@@ -3129,14 +3220,40 @@ async def batting_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ {selected['name']} is already on the pitch!")
         return
 
+    async def _maybe_announce_god(player_dict):
+        """Send a one-time God-level entry announcement for this match."""
+        if users_col is None:
+            return
+        try:
+            ud = await users_col.find_one({"user_id": player_dict["id"]})
+            if ud and get_user_level(ud.get("exp", 0)) == "God ☯️":
+                announced = game.setdefault("god_announced", set())
+                if player_dict["id"] not in announced:
+                    announced.add(player_dict["id"])
+                    _pid  = player_dict["id"]
+                    _pname = player_dict["name"]
+                    await context.bot.send_message(
+                        chat_id,
+                        f"🌌 <b>A GOD HAS ENTERED THE ARENA!</b> ☯️\n\n"
+                        f"🛐 <a href='tg://user?id={_pid}'>{_pname}</a> "
+                        f"— <b>God ☯️</b> level — strides onto the sacred pitch!\n\n"
+                        f"⚡ Mortals, you have been warned. This is not just a batter — "
+                        f"this is a force of nature. Pray for your wickets. 🔥",
+                        parse_mode="HTML",
+                    )
+        except Exception:
+            pass
+
     if game["waiting_for"] == "TEAM_OPENERS_BAT":
         if not game.get("striker"):
             game["striker"]        = selected
             selected["is_striker"] = True
+            await _maybe_announce_god(selected)
             await update.message.reply_text(f"🏏 <b>{selected['name']}</b> selected as Striker!", parse_mode="HTML")
         elif not game.get("non_striker"):
             game["non_striker"]         = selected
             selected["is_non_striker"]  = True
+            await _maybe_announce_god(selected)
             openers_gif = "https://media.giphy.com/media/hGJTJqTNaj0XXkLXZr/giphy.gif"
             caption_txt = (
                 f"🏏 <b>{selected['name']}</b> selected as Non-Striker!\n\n"
@@ -3148,9 +3265,11 @@ async def batting_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not game.get("striker"):
             game["striker"]        = selected
             selected["is_striker"] = True
+            await _maybe_announce_god(selected)
         elif not game.get("non_striker"):
             game["non_striker"]         = selected
             selected["is_non_striker"]  = True
+            await _maybe_announce_god(selected)
 
         await update.message.reply_text(f"🏏 <b>{selected['name']}</b> walks out to the pitch!", parse_mode="HTML")
         if game.get("need_new_bowler"):
@@ -4070,6 +4189,257 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if game is None:
         game = {"state": "NOT_PLAYING"}
         context.bot_data[chat_id] = game
+
+
+    # ── /rps callbacks ────────────────────────────────────────────────────────
+
+    # Mode selection: play vs bot
+    if query.data.startswith("rps_vs_bot_"):
+        initiator_id = int(query.data.split("_")[-1])
+        if user_id != initiator_id:
+            try:
+                await query.answer("❌ This RPS game wasn't started by you!", show_alert=True)
+            except Exception:
+                pass
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton("✊ Rock",     callback_data=f"rps_pick_bot_rock_{user_id}"),
+                InlineKeyboardButton("📄 Paper",   callback_data=f"rps_pick_bot_paper_{user_id}"),
+                InlineKeyboardButton("✂️ Scissors", callback_data=f"rps_pick_bot_scissors_{user_id}"),
+            ]
+        ]
+        try:
+            await query.edit_message_text(
+                "🤖 <b>VS BOT</b> — Pick your move!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    # Bot game: player picks
+    if query.data.startswith("rps_pick_bot_"):
+        parts = query.data.split("_")
+        # rps_pick_bot_{choice}_{user_id}
+        choice   = parts[3]
+        p_id     = int(parts[4])
+        if user_id != p_id:
+            try:
+                await query.answer("❌ Not your game!", show_alert=True)
+            except Exception:
+                pass
+            return
+        _choices_disp = ["rock ✊", "paper 📄", "scissors ✂️"]
+        bot_pick = random.choice(_choices_disp)
+        bot_plain = bot_pick.split()[0]
+        _wins_map = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
+        if choice == bot_plain:
+            res_txt = "🤝 <b>TIE!</b> Great minds think alike."
+        elif _wins_map[choice] == bot_plain:
+            res_txt = "🏆 <b>YOU WIN!</b> Luck's on your side today!"
+        else:
+            res_txt = "🤖 <b>BOT WINS!</b> Better luck next time bhai 😂"
+        _user_disp = {"rock": "✊ Rock", "paper": "📄 Paper", "scissors": "✂️ Scissors"}
+        try:
+            await query.edit_message_text(
+                f"✊ You: <b>{_user_disp.get(choice, choice)}</b>\n"
+                f"🤖 Bot: <b>{bot_pick}</b>\n\n{res_txt}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    # Mode selection: play vs user (show join button)
+    if query.data.startswith("rps_vs_user_"):
+        parts = query.data.split("_")
+        # rps_vs_user_{chat_id}_{user_id}
+        g_chat_id   = int(parts[3])
+        initiator_id = int(parts[4])
+        if user_id != initiator_id:
+            try:
+                await query.answer("❌ This RPS game wasn't started by you!", show_alert=True)
+            except Exception:
+                pass
+            return
+        # Create pending RPS game
+        rps_key = f"rps_{g_chat_id}_{initiator_id}"
+        if "rps_games" not in context.bot_data:
+            context.bot_data["rps_games"] = {}
+        context.bot_data["rps_games"][rps_key] = {
+            "p1_id": initiator_id,
+            "p1_name": update.effective_user.first_name,
+            "p1_choice": None,
+            "p2_id": None,
+            "p2_name": None,
+            "p2_choice": None,
+            "chat_id": g_chat_id,
+        }
+        keyboard = [[InlineKeyboardButton("⚔️ Join Game", callback_data=f"rps_join_{g_chat_id}_{initiator_id}")]]
+        try:
+            await query.edit_message_text(
+                f"⚔️ <a href='tg://user?id={initiator_id}'>{update.effective_user.first_name}</a> has challenged someone to <b>Rock Paper Scissors!</b>\n\n"
+                "Be the first to click <b>Join Game</b> to accept!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    # Second player joins RPS user game
+    if query.data.startswith("rps_join_"):
+        parts = query.data.split("_")
+        g_chat_id    = int(parts[2])
+        initiator_id = int(parts[3])
+        rps_key = f"rps_{g_chat_id}_{initiator_id}"
+        rps_games = context.bot_data.get("rps_games", {})
+        rps_game  = rps_games.get(rps_key)
+        if not rps_game:
+            try:
+                await query.answer("❌ This game has expired!", show_alert=True)
+            except Exception:
+                pass
+            return
+        if user_id == initiator_id:
+            try:
+                await query.answer("❌ You can't join your own game!", show_alert=True)
+            except Exception:
+                pass
+            return
+        if rps_game["p2_id"] is not None:
+            try:
+                await query.answer("❌ Someone already joined this game!", show_alert=True)
+            except Exception:
+                pass
+            return
+        # Register p2
+        rps_game["p2_id"]   = user_id
+        rps_game["p2_name"] = update.effective_user.first_name
+        p1_link = f"<a href='tg://user?id={rps_game['p1_id']}'>{rps_game['p1_name']}</a>"
+        p2_link = f"<a href='tg://user?id={user_id}'>{update.effective_user.first_name}</a>"
+        # Announce
+        try:
+            await query.edit_message_text(
+                f"⚔️ <b>RPS BATTLE STARTS!</b>\n\n"
+                f"🔴 Player 1: {p1_link}\n"
+                f"🔵 Player 2: {p2_link}\n\n"
+                "Both players — pick your move in your private DMs or below!",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        # Send choice buttons to both players
+        def _rps_kb(pid, gid, iid):
+            return InlineKeyboardMarkup([[
+                InlineKeyboardButton("✊ Rock",      callback_data=f"rps_user_pick_{gid}_{iid}_{pid}_rock"),
+                InlineKeyboardButton("📄 Paper",    callback_data=f"rps_user_pick_{gid}_{iid}_{pid}_paper"),
+                InlineKeyboardButton("✂️ Scissors", callback_data=f"rps_user_pick_{gid}_{iid}_{pid}_scissors"),
+            ]])
+        try:
+            # Send separate pick-message per player so each sees buttons bound to their own ID
+            await context.bot.send_message(
+                chat_id=g_chat_id,
+                text=f"🔴 {p1_link} — pick your move!",
+                reply_markup=_rps_kb(rps_game["p1_id"], g_chat_id, initiator_id),
+                parse_mode="HTML",
+            )
+            await context.bot.send_message(
+                chat_id=g_chat_id,
+                text=f"🔵 {p2_link} — pick your move!",
+                reply_markup=_rps_kb(user_id, g_chat_id, initiator_id),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    # User-game choice pick
+    if query.data.startswith("rps_user_pick_"):
+        parts  = query.data.split("_")
+        # rps_user_pick_{chat_id}_{initiator_id}_{player_id}_{choice}
+        g_chat_id    = int(parts[3])
+        initiator_id = int(parts[4])
+        player_id    = int(parts[5])
+        choice       = parts[6]
+        if user_id != player_id:
+            try:
+                await query.answer("❌ These are not your buttons!", show_alert=True)
+            except Exception:
+                pass
+            return
+        rps_key  = f"rps_{g_chat_id}_{initiator_id}"
+        rps_games = context.bot_data.get("rps_games", {})
+        rps_game  = rps_games.get(rps_key)
+        if not rps_game:
+            try:
+                await query.answer("❌ Game expired!", show_alert=True)
+            except Exception:
+                pass
+            return
+        # Record choice
+        if user_id == rps_game["p1_id"]:
+            if rps_game["p1_choice"]:
+                try:
+                    await query.answer("✅ You already picked!", show_alert=True)
+                except Exception:
+                    pass
+                return
+            rps_game["p1_choice"] = choice
+            try:
+                await query.answer(f"✅ You picked {choice}! Waiting for opponent...", show_alert=True)
+            except Exception:
+                pass
+        elif user_id == rps_game["p2_id"]:
+            if rps_game["p2_choice"]:
+                try:
+                    await query.answer("✅ You already picked!", show_alert=True)
+                except Exception:
+                    pass
+                return
+            rps_game["p2_choice"] = choice
+            try:
+                await query.answer(f"✅ You picked {choice}! Waiting for opponent...", show_alert=True)
+            except Exception:
+                pass
+        else:
+            try:
+                await query.answer("❌ You're not in this game!", show_alert=True)
+            except Exception:
+                pass
+            return
+        # Check if both picked
+        if rps_game["p1_choice"] and rps_game["p2_choice"]:
+            p1c = rps_game["p1_choice"]
+            p2c = rps_game["p2_choice"]
+            winner = _rps_result(p1c, p2c)
+            _disp = {"rock": "✊ Rock", "paper": "📄 Paper", "scissors": "✂️ Scissors"}
+            p1_link = f"<a href='tg://user?id={rps_game['p1_id']}'>{rps_game['p1_name']}</a>"
+            p2_link = f"<a href='tg://user?id={rps_game['p2_id']}'>{rps_game['p2_name']}</a>"
+            if winner == "tie":
+                res_line = "🤝 <b>TIE!</b> Rematch anyone?"
+            elif winner == "p1":
+                res_line = f"🏆 <b>{rps_game['p1_name']} WINS!</b>"
+            else:
+                res_line = f"🏆 <b>{rps_game['p2_name']} WINS!</b>"
+            try:
+                await context.bot.send_message(
+                    chat_id=g_chat_id,
+                    text=(
+                        f"⚔️ <b>RPS RESULT!</b>\n\n"
+                        f"🔴 {p1_link}: <b>{_disp[p1c]}</b>\n"
+                        f"🔵 {p2_link}: <b>{_disp[p2c]}</b>\n\n"
+                        f"{res_line}"
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+            # Clean up game state
+            rps_games.pop(rps_key, None)
+        return
 
     # ── Solo game ─────────────────────────────────────────────────────────
     if query.data == "solo_game":
@@ -5707,10 +6077,9 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # In TEAM mode bowlers may send 0 (0 vs 0 = wicket); SOLO keeps 1-6
         is_team = game.get("mode") == "TEAM"
-        min_bowl = 0 if is_team else 1
+        min_bowl = 1
         if val < min_bowl or val > 6:
-            rng = "0 to 6" if is_team else "1 to 6"
-            await update.message.reply_text(f"❌ Bowlers can only bowl numbers from {rng}!")
+            await update.message.reply_text(f"❌ Bowlers can only bowl numbers from 1 to 6!")
             return
 
         # Spam-free check
@@ -5728,6 +6097,8 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_afk_timer(context, group_id)
         game["current_bowl"] = val
         game["waiting_for"]  = "BATTER"
+        # Clear pending celebration window — delivery has been locked, moment is gone
+        game.pop("awaiting_celebrate", None)
         if user_id in context.bot_data.get("active_bowlers", {}):
             del context.bot_data["active_bowlers"][user_id]
 
@@ -5807,6 +6178,15 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != batter["id"]:
         return
 
+    # ── Hattrick threat: bowler has 2 consecutive wickets → batter cannot play 0 ──
+    if bowler.get("consecutive_wickets", 0) >= 2 and val == 0:
+        await update.message.reply_text(
+            "⚠️ <b>HATTRICK THREAT!</b> 🎩\n"
+            "The bowler is on a hat-trick — you cannot play 0! Minimum is <b>1</b>. 🏏",
+            parse_mode="HTML",
+        )
+        return
+
     hit_val = val
     pause_time = 0
     game["waiting_for"] = "PROCESSING_BATTER"
@@ -5869,12 +6249,42 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             await send_media_safely(context, chat_id, MEDIA["100"], f"👑 <b>CENTURY! TAKE A BOW!</b> 💯🔥\n<a href='tg://user?id={batter['id']}'>{batter['name']}</a> has smashed a glorious century!")
+            # Celebration prompt for Unbeaten/Aura Farmer/God (team mode)
+            if game.get("mode") == "TEAM" and users_col is not None:
+                try:
+                    _ud = await users_col.find_one({"user_id": batter["id"]})
+                    if _ud and get_user_level(_ud.get("exp", 0)) in ("Unbeaten 👑", "Aura Farmer 🔱", "God ☯️"):
+                        game["awaiting_celebrate"] = batter["id"]
+                        _bid, _bname = batter["id"], batter["name"]
+                        await context.bot.send_message(
+                            chat_id,
+                            f"🎊 <a href='tg://user?id={_bid}'>{_bname}</a>, you've earned the right to celebrate! "
+                            f"Type <code>/celebrate</code> before the next ball! 🎉",
+                            parse_mode="HTML",
+                        )
+                except Exception:
+                    pass
         elif old_runs < 50 and batter["runs"] >= 50:
             try:
                 await update_user_db(batter["id"], {"exp": 50})
             except Exception:
                 pass
             await send_media_safely(context, chat_id, MEDIA["50"], f"🏏 <b>HALF-CENTURY! BRILLIANT INNINGS!</b> 💥🙌\n<a href='tg://user?id={batter['id']}'>{batter['name']}</a> reaches 50!")
+            # Celebration prompt for Unbeaten/Aura Farmer/God (team mode)
+            if game.get("mode") == "TEAM" and users_col is not None:
+                try:
+                    _ud = await users_col.find_one({"user_id": batter["id"]})
+                    if _ud and get_user_level(_ud.get("exp", 0)) in ("Unbeaten 👑", "Aura Farmer 🔱", "God ☯️"):
+                        game["awaiting_celebrate"] = batter["id"]
+                        _bid, _bname = batter["id"], batter["name"]
+                        await context.bot.send_message(
+                            chat_id,
+                            f"🎊 <a href='tg://user?id={_bid}'>{_bname}</a>, you've earned the right to celebrate! "
+                            f"Type <code>/celebrate</code> before the next ball! 🎉",
+                            parse_mode="HTML",
+                        )
+                except Exception:
+                    pass
 
         if game.get("mode") == "TEAM" and hit_val % 2 != 0:
             swap_strike(game)
@@ -6202,12 +6612,42 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             await send_media_safely(context, chat_id, MEDIA["100"], f"👑 <b>CENTURY! TAKE A BOW!</b> 💯🔥\n<a href='tg://user?id={batter['id']}'>{batter['name']}</a> has smashed a glorious century!")
+            # Celebration prompt for Unbeaten/Aura Farmer/God (team mode)
+            if game.get("mode") == "TEAM" and users_col is not None:
+                try:
+                    _ud = await users_col.find_one({"user_id": batter["id"]})
+                    if _ud and get_user_level(_ud.get("exp", 0)) in ("Unbeaten 👑", "Aura Farmer 🔱", "God ☯️"):
+                        game["awaiting_celebrate"] = batter["id"]
+                        _bid, _bname = batter["id"], batter["name"]
+                        await context.bot.send_message(
+                            chat_id,
+                            f"🎊 <a href='tg://user?id={_bid}'>{_bname}</a>, you've earned the right to celebrate! "
+                            f"Type <code>/celebrate</code> before the next ball! 🎉",
+                            parse_mode="HTML",
+                        )
+                except Exception:
+                    pass
         elif old_runs < 50 and batter["runs"] >= 50:
             try:
                 await update_user_db(batter["id"], {"exp": 50})
             except Exception:
                 pass
             await send_media_safely(context, chat_id, MEDIA["50"], f"🏏 <b>HALF-CENTURY! BRILLIANT INNINGS!</b> 💥🙌\n<a href='tg://user?id={batter['id']}'>{batter['name']}</a> reaches 50!")
+            # Celebration prompt for Unbeaten/Aura Farmer/God (team mode)
+            if game.get("mode") == "TEAM" and users_col is not None:
+                try:
+                    _ud = await users_col.find_one({"user_id": batter["id"]})
+                    if _ud and get_user_level(_ud.get("exp", 0)) in ("Unbeaten 👑", "Aura Farmer 🔱", "God ☯️"):
+                        game["awaiting_celebrate"] = batter["id"]
+                        _bid, _bname = batter["id"], batter["name"]
+                        await context.bot.send_message(
+                            chat_id,
+                            f"🎊 <a href='tg://user?id={_bid}'>{_bname}</a>, you've earned the right to celebrate! "
+                            f"Type <code>/celebrate</code> before the next ball! 🎉",
+                            parse_mode="HTML",
+                        )
+                except Exception:
+                    pass
 
         if game.get("mode") == "TEAM":
             if game.get("innings") == 2 and game["batting_team_ref"]["score"] >= game.get("target", 0):
@@ -7414,122 +7854,461 @@ async def shift_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# /sledge command
+# /sledge command — sledge texts loaded from fonts/batters.txt at startup
 # ---------------------------------------------------------------------------
 
-_SLEDGE_LINES = [
-    "Bhai tera bat hai ya jhadu? Aise swing ho raha hai! 🧹",
-    "Tu cricket khelne aaya hai ya crowd ki ginti badhane? 🎟️",
-    "Teri bowling dekh ke ball khud ro raha tha! 😭",
-    "Tera highest score meri age se kam hai bhai 💀",
-    "Tu pitch pe aaya aur opposition ne celebration shuru kar di 🥂",
-    "Itna practice kiya aur fir bhi yahi haal? Wapas nets pe ja! 🏃",
-    "Teri fielding dekh ke lagta hai tu slow motion mein chal raha hai 🐢",
-    "Ball tujhse zyada tez sochti hai bhai 🧠",
-    "Tu bowler hai ya juggler? Har ball alag direction mein jaati hai 🤹",
-    "Tera career graph dekha? Seedha neeche — elevator bhi itna fast nahi jaata 📉",
-    "Bhai tu clown hai 🤡🤡 trying to be smart, ye dekh out hone wala 🤡",
-    "Tu out hoga toh opposition party karega aur tere apne relief lenge 😂",
-    "Tune bat se shot maara ya mosquito udaaya? Same result 🦟",
-    "Tujhe dekhke umpire bhi pehle se OUTTTT bolne ki practice karne laga 🏏",
-    "Teri run rate dekh ke lagta hai tu reverse gear mein hai 🚗",
-    "Bhai itna sasta wicket toh free mein bhi koi nahi leta 🎁",
-    "Tu bowling karega toh batsman ko warm-up dene jaata hai bas 🥱",
-    "Tere catch pakadne ka style dekha? Ball ground pe pahunchi aur tu hawa mein 🫧",
-    "Tera bat straight nahi, life bhi straight nahi — dono mein same problem 😬",
-    "Championship nahi jeeta tu kabhi, but participation certificate zaroor milega 🏅",
-    "Teri economy rate dekhi? MCD aur tu dono barabar waste phailate ho 🗑️",
-    "Bhai tujhe pitch pe jaane se pehle apni kismat pe pity aani chahiye 😔",
-    "Tu striker hai ya scarecrow? Ball seedha paar ho jaati hai 🌾",
-    "Opposition bowler ne tujhe dekha aur hat-trick ki planning start kar li 🎩",
-    "Tune jo shot khela woh shot nahi tha, woh ek cry for help tha 😢",
-    "Bhai tu cricketer nahi, statistician ka nightmare hai 📊",
-    "Itna run kiya tune life mein? Gym mein nahi — pitch se bhaag ke 🏃💨",
-    "Teri batting average meri electricity bill se bhi kam hai 💡",
-    "Tu bat pakad ke khada hota hai jaise pehli baar dekha ho 👀",
-    "Tera technique dekh ke coaches ne coaching chodd di 🎓",
-    "Ball tere bat ko dekhke rasta badal leti hai — self-respect hai usmein 🔄",
-    "Bhai tujhe cricket nahi, chess khelna chahiye — wahan movement nahi hoti ♟️",
-    "Tu pitch pe aaya — ek wicket confirmed ho gayi dono team ko pata hai 📋",
-    "Tera strike rate dekha? Tortoise bhi complain kare ki yaar itna slow mat ho 🐢",
-    "Tu 0 pe out hua aur crowd ne sukoon ki saans li 😮‍💨",
-    "Bhai teri bowling straight nahi jaati toh kya, life bhi toh curve hai 🌀",
-    "Tu fielding mein itna slow hai ki replay mein bhi late lagta hai ⏪",
-    "Tere dismissal video ko motivational fail compilations mein daala gaya hai 🎬",
-    "Duck maarne mein bhi tune record tod diya — kuch toh speciality hai 🦆",
-    "Bhai itni mehnat ke baad bhi yahi result? Kismet ne bhi diya up 🤷",
-    "Teri presence pitch pe hai ya pitch ka illusion hai? Doubt hai 🌫️",
-    "Ball tujhse seedha guzar gayi — social distancing maintain ki usne 😷",
-    "Tune jo over diya woh over nahi tha, woh ek gift hamper tha batting team ko 🎁",
-    "Tera bat heavy hai ya arms? Dono mein se koi toh kaam karo 💪",
-    "Bhai opposition ko tujhse nahi, tere shot selection se darr lagta hai 😱",
-    "Tera record dekha? Umpteen chances, zero results — startup culture 📈",
-    "Tu wicket pe aaya 5 seconds mein gaya — cameo bhi nahi bola ja sakta 🎭",
-    "Teri bowling mein variety hai — wide, no ball, full toss, sab kuch except wicket 🎪",
-    "Bhai tune batting ki ya fielding team ke liye warm-up karaya? Pata nahi chala 🤔",
-    "Tere baad aane wale batter ne pad pehen ke aane se pehle hi celebration ki 🎉",
-    "Tu gaya aur scoreboard ne sigh kiya 😮‍💨 — machine bhi feel karti hai yaar",
-    "Tera form itna kharab hai ki coach ne tujhe 12th man bhi rakhna band kar diya 🪑",
-    "Bhai teri fielding video ko anti-motivation ke liye use karte hain coaches 📹",
-    "Tu pitch pe aaya — aur umpire ne already out ka haath upar uthana practice kiya 🖐️",
-]
+def _load_sledge_lines() -> list:
+    """Load sledge lines from fonts/batters.txt.
+    File format: each line contains one or more quoted strings: "text1" "text2" ...
+    Returns a flat list of all texts. Falls back to a minimal built-in set if file missing.
+    """
+    import re
+    _path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "batters.txt")
+    try:
+        with open(_path, encoding="utf-8") as _f:
+            _raw = _f.read()
+        _found = re.findall(r'"([^"]+)"', _raw)
+        if _found:
+            return _found
+    except Exception:
+        pass
+    # Built-in fallback so the bot stays functional even if file is absent
+    return [
+        "Bhai tera bat hai ya jhadu? 🧹",
+        "Tu cricket khelne aaya hai ya crowd ki ginti badhane? 🎟️",
+        "Tera highest score meri age se kam hai bhai 💀",
+        "Duck maarne mein bhi tune record tod diya — speciality hai 🦆",
+        "Ball tujhse seedha guzar gayi — social distancing maintain ki usne 😷",
+    ]
+
+_SLEDGE_LINES: list = _load_sledge_lines()
+
 
 async def sledge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /sledge — only the striker can be targeted; only opposition players may sledge;
+    sledging is OFF by default per match. Host must run /sledgeon first.
+    """
     if update.effective_chat.type == "private":
         await update.message.reply_text("❌ /sledge can only be used in a group during a match!")
         return
 
-    chat_id   = update.effective_chat.id
-    sledger   = update.effective_user
-    game      = context.bot_data.get(chat_id)
+    chat_id = update.effective_chat.id
+    sledger = update.effective_user
+    game    = context.bot_data.get(chat_id)
 
     if not game or game.get("state") not in ("PLAYING",) or game.get("mode") not in ("TEAM", "SOLO"):
         await update.message.reply_text("❌ No active match right now — save the sledge for the pitch! 🏏")
         return
 
-    target_user, target_username = get_user_from_mention(update)
-
-    # Resolve username via DB if needed
-    if not target_user and target_username and users_col is not None:
-        db_rec = await users_col.find_one({"username": target_username})
-        if db_rec:
-            class _U:
-                def __init__(self, uid, fname, uname):
-                    self.id = uid; self.first_name = fname; self.username = uname
-            target_user = _U(db_rec["user_id"], db_rec.get("first_name","?"), target_username)
-
-    if not target_user:
-        await update.message.reply_text("❌ Tag or reply to a player to sledge them!")
-        return
-
-    # Build set of valid sledge targets (striker, non-striker, current bowler)
-    striker     = game.get("striker") or {}
-    non_striker = game.get("non_striker") or {}
-    bowler      = game.get("current_bowler") or {}
-    valid_ids   = {
-        striker.get("id"),
-        non_striker.get("id"),
-        bowler.get("id"),
-    } - {None}
-
-    if target_user.id not in valid_ids:
+    # Sledging must be enabled by the host
+    if not game.get("sledge_on", False):
         await update.message.reply_text(
-            "❌ You can only sledge the current batters or the bowler on the pitch! 🎯",
+            "🔇 <b>Sledging is currently OFF!</b>\n"
+            "Ask the host to run <code>/sledgeon</code> to enable it for this match. 🏏",
+            parse_mode="HTML",
         )
         return
 
-    if target_user.id == sledger.id:
-        await update.message.reply_text("🤡 Bhai khud ko sledge kar raha hai? Self-awareness ka naya level!")
+    striker = game.get("striker") or {}
+    if not striker:
+        await update.message.reply_text("❌ No batter on strike right now!")
         return
 
-    line = random.choice(_SLEDGE_LINES)
+    # Determine which team the sledger belongs to (must be a BOWLING team participant)
+    sledger_id   = sledger.id
+    batting_team  = game.get("batting_team_ref", {})
+    bowling_team  = game.get("bowling_team_ref", {})
+    batting_ids   = {p["id"] for p in batting_team.get("players", [])}
+    bowling_ids   = {p["id"] for p in bowling_team.get("players", [])}
+
+    if sledger_id == striker.get("id"):
+        await update.message.reply_text("🤡 Khud ko sledge karta hai? Bold strategy bhai!")
+        return
+
+    if sledger_id in batting_ids:
+        await update.message.reply_text(
+            "❌ Only bowling (opposition) team players can sledge the striker! 🎯"
+        )
+        return
+
+    if sledger_id not in bowling_ids:
+        await update.message.reply_text(
+            "❌ Only active participants in the bowling team can sledge! Spectators can't sledge. 🎯"
+        )
+        return
+
+    line = random.choice(_SLEDGE_LINES) if _SLEDGE_LINES else "…"
     sledger_link = f"<a href='tg://user?id={sledger.id}'>{sledger.first_name}</a>"
-    target_link  = f"<a href='tg://user?id={target_user.id}'>{target_user.first_name}</a>"
+    target_link  = f"<a href='tg://user?id={striker['id']}'>{striker['name']}</a>"
     await update.message.reply_text(
-        f"🏏 {sledger_link} <b>edged</b> {target_link} by saying:\n\n"
+        f"🏏 {sledger_link} <b>sledges</b> {target_link}:\n\n"
         f"❝ {line} ❞",
         parse_mode="HTML",
     )
+
+
+async def sledgeon_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Host-only: enable sledging for the current match."""
+    if update.effective_chat.type == "private":
+        return
+    chat_id = update.effective_chat.id
+    game    = context.bot_data.get(chat_id)
+    if not game or game.get("state") not in ("PLAYING",):
+        await update.message.reply_text("❌ No active match to enable sledging in!")
+        return
+    if update.effective_user.id != game.get("host_id"):
+        await update.message.reply_text("❌ Only the match host can enable sledging!")
+        return
+    game["sledge_on"] = True
+    await update.message.reply_text(
+        "🔊 <b>SLEDGING IS NOW ON!</b> 🔥\n"
+        "Opposition players can now use <code>/sledge</code> to taunt the striker! 😤🏏",
+        parse_mode="HTML",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /dice command
+# ---------------------------------------------------------------------------
+
+async def dice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Roll a 1–6 die and announce the result with a fun message."""
+    rolled = random.randint(1, 6)
+    _dice_msgs = {
+        1: "💀 <b>1!</b> Absolutely dismal. The dice hates you. Go touch grass.",
+        2: "😬 <b>2!</b> Almost as bad as 1, but at least you tried. Barely.",
+        3: "😐 <b>3!</b> Dead average. Neither god nor rubber duck. You are… meh.",
+        4: "🙂 <b>4!</b> A respectable four! The dice acknowledges your existence.",
+        5: "😎 <b>5!</b> Ooh nice! The dice is warming up to you. Keep going!",
+        6: "🔥 <b>6!</b> SIXER! Maximum! The dice gods smile upon you today! 🎉",
+    }
+    user = update.effective_user
+    await update.message.reply_text(
+        f"🎲 <a href='tg://user?id={user.id}'>{user.first_name}</a> rolled the dice...\n\n"
+        f"{_dice_msgs[rolled]}",
+        parse_mode="HTML",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /celebrate command
+# ---------------------------------------------------------------------------
+
+async def celebrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Triggered after a 50/100 by an Unbeaten/Aura Farmer/God player.
+    Sends a roast tagging the opposite captain, optionally with a celebration video.
+    """
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("❌ /celebrate only works in a group during a match!")
+        return
+
+    chat_id = update.effective_chat.id
+    user    = update.effective_user
+    game    = context.bot_data.get(chat_id)
+
+    if not game or game.get("state") != "PLAYING" or game.get("mode") != "TEAM":
+        await update.message.reply_text("❌ No active team match to celebrate in!")
+        return
+
+    if game.get("awaiting_celebrate") != user.id:
+        await update.message.reply_text("❌ It's not your moment to celebrate right now! 😅")
+        return
+
+    # Clear the flag
+    game.pop("awaiting_celebrate", None)
+
+    # Identify opposite captain
+    batting_team  = game.get("batting_team_ref", {})
+    bowling_team  = game.get("bowling_team_ref", {})
+    opp_cap_id    = bowling_team.get("captain")
+    opp_cap_name  = "Captain"
+    for p in bowling_team.get("players", []):
+        if p["id"] == opp_cap_id:
+            opp_cap_name = p["name"]
+            break
+
+    _roast_lines = [
+        f"👉 <a href='tg://user?id={opp_cap_id}'>{opp_cap_name}</a> bhai, what did you tell your bowler to bowl? 🤡 That was GIFT WRAPPED! 🎁",
+        f"📞 <a href='tg://user?id={opp_cap_id}'>{opp_cap_name}</a>, your bowling plan has the same quality as a 2G connection — trash and slow! 🐌",
+        f"😂 <a href='tg://user?id={opp_cap_id}'>{opp_cap_name}</a> called a team meeting and this is the result? That meeting was useless bhai! 🗑️",
+        f"🏆 <a href='tg://user?id={opp_cap_id}'>{opp_cap_name}</a>, your team's bowling is sponsored by 'We Give Runs Foundation' 🤣",
+        f"🎪 <a href='tg://user?id={opp_cap_id}'>{opp_cap_name}</a>, I scored off your bowling like picking mangoes off a tree — too easy bhai 😤",
+    ]
+
+    celeb_text = (
+        f"🎉 <a href='tg://user?id={user.id}'>{user.first_name}</a> <b>CELEBRATES!</b> 🎊\n\n"
+        f"{random.choice(_roast_lines)}\n\n"
+        f"🤡 CLOWN STATUS: ACHIEVED"
+    )
+
+    # Try to fetch a celebration video from DB
+    video_sent = False
+    if celebrations_col is not None:
+        try:
+            _vids = await celebrations_col.distinct("file_id")
+            if _vids:
+                _vid = random.choice(_vids)
+                await context.bot.send_video(
+                    chat_id, video=_vid, caption=celeb_text, parse_mode="HTML"
+                )
+                video_sent = True
+        except Exception:
+            pass
+
+    if not video_sent:
+        await context.bot.send_message(chat_id, celeb_text, parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# /addceleb command (bot owner only)
+# ---------------------------------------------------------------------------
+
+async def addceleb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bot owner only: reply to a video to add it to the celebrations pool (max 10)."""
+    if update.effective_user.id not in OWNER_IDS:
+        await update.message.reply_text("❌ Owner-only command!")
+        return
+    if celebrations_col is None:
+        await update.message.reply_text("❌ Database not connected!")
+        return
+
+    replied = update.message.reply_to_message
+    if not replied or not replied.video:
+        await update.message.reply_text("❌ Reply to a video message to add it to the celebration pool!")
+        return
+
+    file_id = replied.video.file_id
+    count = await celebrations_col.count_documents({})
+    if count >= 10:
+        await update.message.reply_text(
+            "⚠️ Celebration pool is full (max 10)! Delete one with <code>/delceleb</code> first.",
+            parse_mode="HTML",
+        )
+        return
+
+    existing = await celebrations_col.find_one({"file_id": file_id})
+    if existing:
+        await update.message.reply_text("⚠️ This video is already in the pool!")
+        return
+
+    await celebrations_col.insert_one({"file_id": file_id})
+    new_count = await celebrations_col.count_documents({})
+    await update.message.reply_text(
+        f"✅ Celebration video added! Pool now has <b>{new_count}/10</b> videos. 🎬",
+        parse_mode="HTML",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10 Fun Commands
+# ---------------------------------------------------------------------------
+
+async def flipcoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🪙 /flip — Flip a coin: Heads or Tails."""
+    result = random.choice(["🪙 <b>HEADS!</b>", "🦅 <b>TAILS!</b>"])
+    user = update.effective_user
+    await update.message.reply_text(
+        f"🪙 <a href='tg://user?id={user.id}'>{user.first_name}</a> flips the coin...\n\n{result}",
+        parse_mode="HTML",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /rps — Rock Paper Scissors (vs Bot OR vs another User)
+# ---------------------------------------------------------------------------
+
+def _rps_result(p1_choice: str, p2_choice: str) -> str:
+    """Return 'p1', 'p2', or 'tie' given two choices."""
+    _wins = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
+    if p1_choice == p2_choice:
+        return "tie"
+    return "p1" if _wins[p1_choice] == p2_choice else "p2"
+
+
+async def rps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """✊ /rps — Rock Paper Scissors: play vs the Bot or challenge another user."""
+    user = update.effective_user
+    keyboard = [
+        [
+            InlineKeyboardButton("🤖 Play vs Bot", callback_data=f"rps_vs_bot_{user.id}"),
+            InlineKeyboardButton("👥 Challenge a User", callback_data=f"rps_vs_user_{update.effective_chat.id}_{user.id}"),
+        ]
+    ]
+    await update.message.reply_text(
+        f"✊ <a href='tg://user?id={user.id}'>{user.first_name}</a> wants to play <b>Rock Paper Scissors!</b>\n\n"
+        "Choose your mode:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+
+
+async def crimerate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🕵️ /crimerate — Measure a player's crime rate (for fun)."""
+    user   = update.effective_user
+    target, _ = get_user_from_mention(update)
+    name   = target.first_name if target else user.first_name
+    rate   = random.randint(0, 100)
+    if rate < 20:
+        verdict = "😇 Pure soul. Suspiciously innocent."
+    elif rate < 50:
+        verdict = "😐 Questionable. Bear watching."
+    elif rate < 80:
+        verdict = "😈 Menace to society confirmed."
+    else:
+        verdict = "🚨 FBI, OPEN UP! Maximum criminal energy."
+    await update.message.reply_text(
+        f"🕵️ <b>Crime Rate Analysis</b>\n\n"
+        f"👤 Subject: <b>{name}</b>\n"
+        f"📊 Crime Rate: <b>{rate}%</b>\n"
+        f"🔍 Verdict: {verdict}",
+        parse_mode="HTML",
+    )
+
+
+async def iqtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🧠 /iqtest — Get your (random) IQ score."""
+    user = update.effective_user
+    iq   = random.randint(1, 200)
+    if iq < 60:
+        tag = "🐟 Have you tried turning your brain off and on again?"
+    elif iq < 100:
+        tag = "😐 Average human. You exist, which is something."
+    elif iq < 140:
+        tag = "🎓 Respectable! You probably know what photosynthesis means."
+    elif iq < 180:
+        tag = "🧬 Galaxy-brain alert. Stephen Hawking's distant cousin."
+    else:
+        tag = "👽 Off the charts. Are you even from this planet?"
+    await update.message.reply_text(
+        f"🧠 <b>IQ Test Results</b>\n\n"
+        f"👤 <a href='tg://user?id={user.id}'>{user.first_name}</a>\n"
+        f"📊 IQ Score: <b>{iq}</b>\n"
+        f"🔬 Analysis: {tag}",
+        parse_mode="HTML",
+    )
+
+
+async def roastme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🔥 /roastme — Get roasted by the bot."""
+    user   = update.effective_user
+    roasts = [
+        "You play cricket like you code — full of bugs and no output. 🐛",
+        "Your batting average has more zeros than your bank balance. 💸",
+        "Even the duck feels sorry for you. 🦆",
+        "Bhai, you need a GPS just to find the pitch. 📍",
+        "Your yorker is so bad, the ball apologized to the batter. 😭",
+        "You bowl so slow, WhatsApp delivers faster. 📱",
+        "The umpire raised his finger before you even bowled. ☝️",
+        "Bhai you're not a cricketer, you're a cricket-enthusiast-in-denial. 🤡",
+    ]
+    await update.message.reply_text(
+        f"🔥 <b>ROAST INCOMING!</b>\n\n"
+        f"<a href='tg://user?id={user.id}'>{user.first_name}</a>: "
+        f"{random.choice(roasts)}",
+        parse_mode="HTML",
+    )
+
+
+async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """💌 /compliment — Receive a genuine (random) compliment."""
+    user  = update.effective_user
+    comps = [
+        "Your cover drive is smoother than butter on warm roti. 🏏✨",
+        "You're the Virat Kohli of this group — minus the tantrum. 👑",
+        "Your bowling accuracy is genuinely terrifying. Keep it up! 🎯",
+        "You play with the confidence of someone who actually practised. Rare. 💪",
+        "Even when you score 0, you do it with class. That's elite. 😤",
+        "The way you read the pitch — honestly, impressive bhai. 🧠",
+        "Your run-rate would make captains cry with joy. 🏆",
+        "You're not just a player — you're an experience. 🌟",
+    ]
+    await update.message.reply_text(
+        f"💌 <b>A compliment for you!</b>\n\n"
+        f"<a href='tg://user?id={user.id}'>{user.first_name}</a>: "
+        f"{random.choice(comps)}",
+        parse_mode="HTML",
+    )
+
+
+async def shipme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """💘 /partner — Measure compatibility between two tagged users."""
+    user   = update.effective_user
+    target, _ = get_user_from_mention(update)
+    if not target:
+        await update.message.reply_text("❌ Tag someone to check partner compatibility with! Usage: <code>/partner @username</code>", parse_mode="HTML")
+        return
+    pct  = random.randint(0, 100)
+    if pct < 30:
+        verdict = "💔 Disaster. Not even in the same team."
+    elif pct < 60:
+        verdict = "🤝 Decent partnership. Could share a dressing room."
+    elif pct < 85:
+        verdict = "💛 Solid batting pair! Good chemistry on and off the pitch."
+    else:
+        verdict = "❤️ PERFECT MATCH! Open the innings together forever!"
+    await update.message.reply_text(
+        f"💘 <b>Partner Compatibility!</b>\n\n"
+        f"👤 {user.first_name} + {target.first_name}\n"
+        f"📊 Compatibility: <b>{pct}%</b>\n"
+        f"{verdict}",
+        parse_mode="HTML",
+    )
+
+
+async def funfact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📚 /funfact — Get a random cricket fun fact."""
+    facts = [
+        "🏏 Sir Donald Bradman's Test average of 99.94 is so far ahead, the #2 is below 61.",
+        "🌍 Cricket was first played in England in the 16th century — older than most countries!",
+        "🎩 A 'hat-trick' in cricket predates the phrase in any other sport.",
+        "🦆 The term 'duck' comes from 'duck's egg' — the shape of 0 on a scoreboard.",
+        "💨 The fastest recorded delivery was 161.3 km/h by Shoaib Akhtar in 2003.",
+        "🌧️ Rain stopped play in a match that was once resumed 5 years later — true story (sort of).",
+        "🏟️ The longest cricket match ever played lasted 14 days — with no result.",
+        "🪄 Muttiah Muralitharan took 800 Test wickets — more than any other bowler in history.",
+        "📺 The first Cricket World Cup was in 1975, held in England.",
+        "🔢 A perfect over (6 consecutive wickets) has only happened a handful of times in history.",
+    ]
+    await update.message.reply_text(
+        f"📚 <b>Cricket Fun Fact!</b>\n\n{random.choice(facts)}",
+        parse_mode="HTML",
+    )
+
+
+async def randomteam_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🎲 /randomteam — Randomly pick an international cricket team for fun."""
+    teams = [
+        "🇮🇳 India", "🇵🇰 Pakistan", "🇦🇺 Australia", "🏴󠁧󠁢󠁥󠁮󠁧󠁿 England",
+        "🇱🇰 Sri Lanka", "🇳🇿 New Zealand", "🇿🇦 South Africa",
+        "🇧🇩 Bangladesh", "🇼🇸 West Indies", "🇦🇫 Afghanistan",
+        "🇮🇪 Ireland", "🇿🇼 Zimbabwe",
+    ]
+    team = random.choice(teams)
+    user = update.effective_user
+    await update.message.reply_text(
+        f"🎲 <a href='tg://user?id={user.id}'>{user.first_name}</a>'s random team today:\n\n"
+        f"🏆 <b>{team}</b>\n\n"
+        f"Channel that energy on the pitch! 🏏",
+        parse_mode="HTML",
+    )
+
+
+async def battingorder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🃏 /battingorder — Shuffle a random legendary batting order for fun."""
+    legends = [
+        "Sachin Tendulkar", "Virat Kohli", "Ricky Ponting", "Brian Lara",
+        "Don Bradman", "AB de Villiers", "MS Dhoni", "Kumar Sangakkara",
+        "Jacques Kallis", "Chris Gayle", "Rohit Sharma", "Steve Smith",
+    ]
+    random.shuffle(legends)
+    order = legends[:6]
+    text  = "🃏 <b>Your Random Legendary Batting Order!</b>\n\n"
+    for i, name in enumerate(order, 1):
+        text += f"{i}. {name}\n"
+    text += "\n🏏 Go win the World Cup!"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 # ---------------------------------------------------------------------------
@@ -7744,8 +8523,22 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("transfer",    transfer_command))
     app.add_handler(CommandHandler("hosts",       hosts_command))
     app.add_handler(CommandHandler("ownerhelp",   ownerhelp_command))
-    app.add_handler(CommandHandler("sledge",      sledge_command))
-    app.add_handler(CommandHandler("compare",     compare_command))
+    app.add_handler(CommandHandler("sledge",        sledge_command))
+    app.add_handler(CommandHandler("sledgeon",     sledgeon_command))
+    app.add_handler(CommandHandler("dice",         dice_command))
+    app.add_handler(CommandHandler("celebrate",    celebrate_command))
+    app.add_handler(CommandHandler("addceleb",     addceleb_command))
+    app.add_handler(CommandHandler("flip",         flipcoin_command))
+    app.add_handler(CommandHandler("rps",          rps_command))
+    app.add_handler(CommandHandler("crimerate",    crimerate_command))
+    app.add_handler(CommandHandler("iqtest",       iqtest_command))
+    app.add_handler(CommandHandler("roastme",      roastme_command))
+    app.add_handler(CommandHandler("compliment",   compliment_command))
+    app.add_handler(CommandHandler("partner",      shipme_command))
+    app.add_handler(CommandHandler("funfact",      funfact_command))
+    app.add_handler(CommandHandler("randomteam",   randomteam_command))
+    app.add_handler(CommandHandler("battingorder", battingorder_command))
+    app.add_handler(CommandHandler("compare",      compare_command))
 
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo_input))
